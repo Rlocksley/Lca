@@ -1,0 +1,175 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : enable
+
+// Define the workgroup size
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// ------------------------------------------------------------------
+// Structs
+// ------------------------------------------------------------------
+
+// Fits VkDrawIndexedIndirectCommand
+struct DrawIndexedIndirectCommand {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int  vertexOffset;
+    uint firstInstance;
+};
+
+
+struct ModelMatrix{
+    mat4 model;
+    mat4 normal;
+    vec4 scale; // xyz = scale, w = padding
+    vec4 rotation; // quaternion
+    vec4 position;
+};
+
+struct ObjectInstance {
+    uint transformID; // Index into a ModelMatrix buffer
+    uint shaderID;       // Index of the IndirectBuffer to write to
+    uint meshID;         // ID to look up mesh details (indexCount, etc)
+    uint materialID;
+};
+
+struct MeshInfo {
+    uint indexCount;
+    uint firstIndex;
+    uint vertexCount;
+    int  vertexOffset;
+    vec4 boundingSphere; // xyz = local center, w = radius
+};
+
+// ------------------------------------------------------------------
+// Bindings
+// ------------------------------------------------------------------
+
+// Binding 0: Camera / Frustum Data
+layout(set = 0, binding = 0) uniform CameraData {
+    vec4 frustumPlanes[6];
+    mat4 viewProjection;
+    vec3 camPos;
+    vec3 camDir;
+} cam;
+
+// Binding 1: All Objects in the scene (The "Mega List")
+layout(set = 0, binding = 1) readonly buffer ObjectBuffer {
+    ObjectInstance instances[];
+} objects;
+
+layout(set = 0, binding = 2) readonly buffer ModelMatrixBuffer {
+    ModelMatrix transforms[];
+} modelMatrices;
+
+
+// Binding 2: Mesh Registry (lookup for index counts, offsets)
+layout(set = 0, binding = 3) readonly buffer MeshBuffer {
+    MeshInfo meshes[];
+} meshData;
+
+// Binding 3: Atomic Counters structure
+// One integer per shaderID. Initialize to 0 before dispatch.
+// This tracks how many commands have been written to each buffer.
+layout(set = 0, binding = 4) buffer Counters {
+    uint count[];
+} drawCounts;
+
+// Binding 4: The Array of Indirect Buffers
+// This requires the descriptor set layout to have the VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT_EXT 
+// or simply a large array size with PARTIALLY_BOUND_BIT.
+// In GLSL, this appears as an unbounded array of buffers.
+layout(set = 0, binding = 5) writeonly buffer IndirectDraws {
+    DrawIndexedIndirectCommand commands[];
+} indirectBuffers[];
+
+layout(set = 0, binding = 6) readonly buffer IndirectCapacities {
+    uint capacity[];
+} indirectCapacities;
+
+// ------------------------------------------------------------------
+// Helper Functions
+// ------------------------------------------------------------------
+
+bool isVisible(vec4 sphere) {
+    // Simple sphere-frustum check
+    for (int i = 0; i < 6; i++) {
+        if (dot(cam.frustumPlanes[i], vec4(sphere.xyz, 1.0)) < -sphere.w) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool tryReserveCommandSlot(uint shaderIndex, uint maxCommands, out uint cmdIndex) {
+    cmdIndex = atomicAdd(drawCounts.count[shaderIndex], 1);
+    return cmdIndex < maxCommands;
+}
+
+// ------------------------------------------------------------------
+// Main
+// ------------------------------------------------------------------
+
+void main() {
+    uint gID = gl_GlobalInvocationID.x;
+
+    // Boundary check
+    if (gID >= objects.instances.length()) {
+        return;
+    }
+
+    // 1. Fetch Object Data
+    ObjectInstance obj = objects.instances[gID];
+
+    // Check if this slot is empty/invalid
+    // Assuming UINT32_MAX (~0u) is used as the clear value for transformID
+    if (obj.transformID == 0xFFFFFFFF) {
+        return;
+    }
+    
+    // 2. Fetch Mesh Data (Needed for Bounding Sphere)
+    if (obj.meshID >= meshData.meshes.length()) {
+        return;
+    }
+    MeshInfo mesh = meshData.meshes[obj.meshID];
+
+    // 3. Transform Bounding Sphere to World Space
+    vec3 worldCenter = (modelMatrices.transforms[obj.transformID].model * 
+                        vec4(mesh.boundingSphere.xyz, 1.0)).xyz;
+    vec4 scale = modelMatrices.transforms[obj.transformID].scale;
+    float worldRadius = mesh.boundingSphere.w * max(max(abs(scale.x), abs(scale.y)), abs(scale.z));
+
+    // 4. Frustum Cull with World Sphere
+    if (isVisible(vec4(worldCenter, worldRadius))) {
+        
+        // 5. Identify Target Buffer (Shader)
+        // 'nonuniformEXT' is required here because obj.shaderID varies 
+        // per thread within the same warp/subgroup.
+        uint shaderIndex = obj.shaderID; 
+        if (shaderIndex >= indirectCapacities.capacity.length()) {
+            return;
+        }
+        uint maxCommands = indirectCapacities.capacity[shaderIndex];
+        if (maxCommands == 0) {
+            return;
+        }
+        
+        // 6. Reserve Slot in the format-specific buffer
+        uint cmdIndex = 0;
+        if (!tryReserveCommandSlot(shaderIndex, maxCommands, cmdIndex)) {
+            return;
+        }
+
+        // 7. Build the Draw Command
+        DrawIndexedIndirectCommand cmd;
+        cmd.indexCount    = mesh.indexCount;
+        cmd.instanceCount = 1;             // Assuming 1 instance per draw for MDI
+        cmd.firstIndex    = mesh.firstIndex;
+        cmd.vertexOffset  = mesh.vertexOffset;
+        cmd.firstInstance = gID;           // Pass global ID to Vertex Shader (gl_InstanceIndex)
+
+        // 8. Write to the specific Indirect Buffer
+        // We use the nonuniform index here to select the correct buffer from the array.
+        indirectBuffers[nonuniformEXT(shaderIndex)].commands[cmdIndex] = cmd;
+    }
+}
