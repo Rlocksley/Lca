@@ -2,16 +2,16 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Release lca_example1",
+      "name": "Debug lca_example1",
       "type": "cppvsdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/build/examples/example1/Release/lca_example1.exe",
+      "program": "${workspaceFolder}/build/examples/example1/Debug/lca_example1.exe",
       "args": [],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
       "environment": [],
       "console": "integratedTerminal",
-      "preLaunchTask": "build lca_example1 (Release)"
-    }
+      "preLaunchTask": "build lca_example1 (Debug)"
+    },
   ]
 }

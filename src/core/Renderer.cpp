@@ -17,7 +17,7 @@ namespace Lca{
 
         void Renderer::init(){
            
-            objectInstances = createDualBuffer(Lca::Core::MAX_OBJECTS, sizeof(ObjectInstance), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+            objectInstances = createSlotBuffer(Lca::Core::MAX_OBJECTS, sizeof(ObjectInstance), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
             mappedObjectInstances = static_cast<ObjectInstance*>(objectInstances.interface.pMemory);
            
             modelMatrices = createSlotBuffer(Lca::Core::MAX_MODEL_MATRICES, sizeof(ModelMatrix), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -51,7 +51,7 @@ namespace Lca{
             meshPipelines.clear();
 
             destroySlotBuffer(modelMatrices);
-            destroyDualBuffer(objectInstances);
+            destroySlotBuffer(objectInstances);
 
         }
 
@@ -117,8 +117,8 @@ namespace Lca{
                 );
 
                 constexpr uint32_t WORKGROUP_SIZE_X = 256;
-                if (nextObjectInstanceID > 0) {
-                    const uint32_t groupCountX = (nextObjectInstanceID + WORKGROUP_SIZE_X - 1) / WORKGROUP_SIZE_X;
+                if (objectInstanceBufferSize > 0) {
+                    const uint32_t groupCountX = (objectInstanceBufferSize + WORKGROUP_SIZE_X - 1) / WORKGROUP_SIZE_X;
                     vkCmdDispatch(command.vkCommandBuffer, groupCountX, 1, 1);
                 }
             }
@@ -197,7 +197,6 @@ namespace Lca{
         void Renderer::submitFrame(){
             submitGraphicsCommand(command);
             presentGraphics(command);
-            resetObjectInstances();
         }
 
         uint32_t Renderer::addModelMatrix(const ModelMatrix& matrix){
@@ -210,6 +209,25 @@ namespace Lca{
             modelMatrices.remove(id);
         }
 
+        uint32_t Renderer::addObjectInstance(const ObjectInstance& instance){
+            uint32_t id =  objectInstances.add((void*)&instance);
+            objectInstanceBufferSize = objectInstances.size;
+            return id;
+        }
+
+        void Renderer::updateObjectInstance(uint32_t id, const ObjectInstance& instance){
+            ObjectInstance* dst = mappedObjectInstances + id;
+            *dst = instance;
+        }
+
+        void Renderer::removeObjectInstance(uint32_t id){
+            ObjectInstance dummy;
+            dummy.transformID = UINT32_MAX;
+            ObjectInstance* dst = mappedObjectInstances + id;
+            *dst = dummy;
+            objectInstances.remove(id);
+        }
+            
         uint32_t Renderer::addMeshPipeline(const std::string& name, MeshPipeline&& pipeline, uint32_t maxObjects){
             LCA_ASSERT(meshPipelineMap.find(name) == meshPipelineMap.end(), "Renderer", "addMeshPipeline", "Mesh pipeline name already exists.")
             LCA_ASSERT(meshPipelines.size() < MAX_SHADERS, "Renderer", "addMeshPipeline", "Exceeded MAX_SHADERS capacity.")

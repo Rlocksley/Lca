@@ -56,26 +56,11 @@ namespace Lca {
             }   
             void removeModelMatrix(uint32_t id);
 
-            void resetObjectInstances() {
-                nextObjectInstanceID = 0;
-            }
+            uint32_t addObjectInstance(const ObjectInstance& instance);
+            void updateObjectInstance(uint32_t id, const ObjectInstance& instance);
+            void removeObjectInstance(uint32_t id);
 
-            inline void addObjectInstance(const ObjectInstance& instance){
-                //LCA_ASSERT(nextObjectInstanceID < MAX_OBJECTS, "Renderer", "addObjectInstance", "Exceeded MAX_OBJECTS capacity.")
-                ObjectInstance* dst = mappedObjectInstances + nextObjectInstanceID;
-                *dst = instance;
-                nextObjectInstanceID++;
-            }
-
-            inline ObjectInstance* reserveObjectInstances(uint32_t count){
-                //LCA_ASSERT(nextObjectInstanceID + count <= MAX_OBJECTS, "Renderer", "reserveObjectInstances", "Exceeded MAX_OBJECTS capacity.")
-                ObjectInstance* dst = mappedObjectInstances + nextObjectInstanceID;
-                nextObjectInstanceID += count;
-                return dst;
-            }
-            
             uint32_t addMeshPipeline(const std::string& name, MeshPipeline&& pipeline, uint32_t maxObjects = MAX_OBJECTS);
-
             uint32_t getMeshPipelineId(const std::string& name) const;
 
             void updatePipelineDescriptorSets();
@@ -99,8 +84,8 @@ namespace Lca {
           
             private:
             
-            uint32_t nextObjectInstanceID = 0;
-            DualBuffer objectInstances;
+            uint32_t objectInstanceBufferSize = 0;
+            SlotBuffer objectInstances;
             ObjectInstance* mappedObjectInstances = nullptr;
 
             SlotBuffer modelMatrices;

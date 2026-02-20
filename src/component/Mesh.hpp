@@ -13,6 +13,10 @@ namespace Lca{
             uint32_t materialID;
             uint32_t pipelineID;
         };
+
+        struct MeshRender{
+            uint32_t objectInstanceID;
+        };
     }
 
     namespace Module{
@@ -20,24 +24,34 @@ namespace Lca{
             Mesh(flecs::world& world){
                 world.component<Lca::Component::Mesh>();
 
-                world.system<const Lca::Component::Mesh, const Lca::Component::Transform, const Lca::Component::TransformID>()
+                world.observer<const Lca::Component::Mesh, const Lca::Component::Transform, const Lca::Component::TransformID>()
                     .term_at(1).parent()
                     .term_at(2).parent()
-                    .run([](flecs::iter& it) {
-                        auto& renderer = Lca::Core::GetRenderer();
+                    .event(flecs::OnSet)
+                    .each([](flecs::entity e, const Lca::Component::Mesh& mesh, const Lca::Component::Transform& transform, const Lca::Component::TransformID& transformID) {
+                        Core::ObjectInstance instance;        
+                        instance.transformID = transformID.id;
+                        instance.shaderID = mesh.pipelineID;
+                        instance.meshID = mesh.meshID;
+                        instance.materialID = mesh.materialID;
 
-                        while(it.next()) {
-                            const auto meshes = it.field<const Lca::Component::Mesh>(0);
-                            const auto transformIDs = it.field<const Lca::Component::TransformID>(2);
+                        if(e.has<Lca::Component::MeshRender>()){
+                            const auto& meshRender = e.get<Lca::Component::MeshRender>();
+                            Core::GetRenderer().updateObjectInstance(meshRender.objectInstanceID, instance);
+                        }
+                        else{
+                            uint32_t id = Core::GetRenderer().addObjectInstance(instance);
+                            e.set<Lca::Component::MeshRender>({ id });
+                        }
+                    });
 
-                            Lca::Core::ObjectInstance* instances = renderer.reserveObjectInstances(it.count());
-
-                            for (int i = 0; i < it.count(); i++) {
-                                instances[i].transformID = transformIDs[i].id;
-                                instances[i].shaderID = meshes[i].pipelineID;
-                                instances[i].meshID = meshes[i].meshID;
-                                instances[i].materialID = meshes[i].materialID;
-                            }
+                world.observer<const Lca::Component::Mesh>()
+                    .event(flecs::OnRemove)
+                    .each([](flecs::entity e, const Lca::Component::Mesh& mesh) {
+                        if(e.has<Lca::Component::MeshRender>()){
+                            const auto& meshRender = e.get<Lca::Component::MeshRender>();
+                            Core::GetRenderer().removeObjectInstance(meshRender.objectInstanceID);
+                            e.remove<Lca::Component::MeshRender>();
                         }
                     });
             }
