@@ -43,50 +43,48 @@ namespace Lca
                     &copyRegion
                 );
             }
+
+            void recordSync(const SingleCommand& command){
+                VkBufferCopy copyRegion{};
+                copyRegion.size = interface.numberElements * interface.elementSize;
+                vkCmdCopyBuffer(
+                    command.vkCommandBuffer,
+                    interface.vkBuffer,
+                    buffer.vkBuffer,
+                    1,
+                    &copyRegion
+                );
+             }
         };
 
-        struct SlotBuffer{
+        struct SlotBufferGPU{
             uint32_t size = 0;
             std::vector<uint32_t> freeSlotIndices;
             BufferInterface interface;
             Buffer buffer;
-            std::vector<uint8_t> clearValue;
 
-            void setClearValue(const void* pData){
-                clearValue.resize(interface.elementSize);
-                memcpy(clearValue.data(), pData, interface.elementSize);
-            }
-
-            uint32_t add(void* pData){
+            const uint32_t add(const void* data){
                 uint32_t index;
                 if(freeSlotIndices.size() > 0){
                     index = freeSlotIndices.back();
                     freeSlotIndices.pop_back();
                 } else {
-                    LCA_ASSERT(size < interface.numberElements, "SlotBuffer", "add", "Exceeded SlotBuffer capacity.")
+                    LCA_ASSERT(size < interface.numberElements, "SlotBufferGPU", "add", "Exceeded SlotBufferGPU capacity.")
                     index = size;
                     size++;
                 }
-                memcpy(static_cast<uint8_t*>(interface.pMemory) + index * interface.elementSize, pData, interface.elementSize);
+                std::memcpy(static_cast<char*>(interface.pMemory) + index*interface.elementSize, data, interface.elementSize);
                 return index;
             }
 
-            void remove(uint32_t index, void* pData = nullptr){
+            void remove(const uint32_t index, void* pData = nullptr){
                 freeSlotIndices.push_back(index);
-
-                if(pData){
-                    memcpy(pData, static_cast<uint8_t*>(interface.pMemory) + index * interface.elementSize, interface.elementSize);
-                }
-
-                if (!clearValue.empty()) {
-                    memcpy(static_cast<uint8_t*>(interface.pMemory) + index * interface.elementSize, clearValue.data(), interface.elementSize);
-                } else {
-                    memset(static_cast<uint8_t*>(interface.pMemory) + index * interface.elementSize, 0, interface.elementSize);
+                if (pData) {
+                    std::memcpy(pData, static_cast<char*>(interface.pMemory) + index*interface.elementSize, interface.elementSize);
                 }
             }
 
             void recordSync(const Command& command){
-                LCA_ASSERT(size <= interface.numberElements, "SlotBuffer", "recordSync", "SlotBuffer size exceeds interface capacity.")
                 VkBufferCopy copyRegion{};
                 copyRegion.size = size * interface.elementSize;
                 vkCmdCopyBuffer(
@@ -98,7 +96,96 @@ namespace Lca
                 );
             }
         };
-/*        
+
+
+        template<typename T, uint32_t N>
+        struct SlotBuffer{
+        private:
+            uint32_t size = 0;
+            std::vector<uint32_t> freeSlotIndices;
+            std::array<T, N> buffer;
+            std::vector<bool> dirtyFlags;
+            std::vector<uint32_t> dirtyIndices;
+            std::vector<uint32_t> dirtyCopiesRemaining;
+
+            inline void markDirty(const uint32_t index){
+                LCA_ASSERT(index < buffer.size(), "SlotBuffer", "markDirty", "Index out of bounds.")
+                if(!dirtyFlags[index]){
+                    dirtyFlags[index] = true;
+                    dirtyIndices.push_back(index);
+                }
+                dirtyCopiesRemaining[index] = MAX_FRAMES_IN_FLIGHT;
+            }
+
+        public:
+            SlotBuffer() : dirtyFlags(N, false), dirtyCopiesRemaining(N, 0) {}
+
+            const uint32_t getSize() const { return size; }
+            const uint32_t add(const T& data){
+                uint32_t index;
+                if(freeSlotIndices.size() > 0){
+                    index = freeSlotIndices.back();
+                    freeSlotIndices.pop_back();
+                } else {
+                    LCA_ASSERT(size < buffer.size(), "SlotBuffer", "add", "Exceeded SlotBuffer capacity.")
+                    index = size;
+                    size++;
+                }
+                buffer[index] = data;
+                markDirty(index);
+                return index;
+            }
+
+            inline void update(const uint32_t index, const T& data){
+                LCA_ASSERT(index < size, "SlotBuffer", "update", "Index out of bounds.")
+                buffer[index] = data;
+                markDirty(index);
+            }
+
+            inline void remove(const uint32_t index){
+                LCA_ASSERT(index < size, "SlotBuffer", "remove", "Index out of bounds.")
+                freeSlotIndices.push_back(index);
+
+                buffer[index] = T{};
+                markDirty(index);
+            }
+
+            inline void copyTo(const BufferInterface& interface){
+                if(dirtyIndices.empty()){
+                    return;
+                }
+
+                LCA_ASSERT(sizeof(T) <= interface.elementSize, "SlotBuffer", "copy", "Element size exceeds interface element size.")
+                LCA_ASSERT(interface.numberElements >= buffer.size(), "SlotBuffer", "copy", "Interface capacity is smaller than SlotBuffer capacity.")
+
+                std::vector<uint32_t> remainingDirtyIndices;
+                remainingDirtyIndices.reserve(dirtyIndices.size());
+
+                for(uint32_t i = 0; i < dirtyIndices.size(); i++){
+                    const uint32_t index = dirtyIndices[i];
+
+                    std::memcpy(
+                        static_cast<char*>(interface.pMemory) + (static_cast<size_t>(index) * interface.elementSize),
+                        &buffer[index],
+                        sizeof(T)
+                    );
+
+                    if(dirtyCopiesRemaining[index] > 0){
+                        dirtyCopiesRemaining[index]--;
+                    }
+
+                    if(dirtyCopiesRemaining[index] == 0){
+                        dirtyFlags[index] = false;
+                    } else {
+                        remainingDirtyIndices.push_back(index);
+                    }
+                }
+
+                dirtyIndices.swap(remainingDirtyIndices);
+            }
+                
+        };
+        /*
         struct Buffer
         {
             uint32_t numberElements;
@@ -131,10 +218,10 @@ namespace Lca
         VkBufferUsageFlags usage);
         void destroyDualBuffer(DualBuffer& dualBuffer);
 
-        SlotBuffer createSlotBuffer
+        SlotBufferGPU createSlotBufferGPU
         (uint32_t numberElements, uint32_t elementSize,
         VkBufferUsageFlags usage);
-        void destroySlotBuffer(SlotBuffer& slotBuffer);
+        void destroySlotBufferGPU(SlotBufferGPU& slotBufferGPU);
 
     }
 }

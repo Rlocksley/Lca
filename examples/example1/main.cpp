@@ -9,6 +9,8 @@
 #include "Image.hpp"
 #include "FlyingCamera.hpp"
 #include <vector>
+#include <thread>
+#include <atomic>
 
 using namespace Lca;
 
@@ -98,7 +100,30 @@ int main() {
     }
 
     // Main loop
+    std::atomic<bool> renderHasWork(false);
+    std::atomic<bool> renderShouldStop(false);
+    std::atomic<uint32_t> renderFrameIndex(0);
+
+    std::thread renderThread([&]() {
+        while(true) {
+            while(!renderHasWork.load(std::memory_order_acquire)) {
+                if(renderShouldStop.load(std::memory_order_acquire)) {
+                    return;
+                }
+                std::this_thread::yield();
+            }
+
+            const uint32_t frameIndex = renderFrameIndex.load(std::memory_order_relaxed);
+            renderHasWork.store(false, std::memory_order_release);
+
+            Core::GetRenderer().recordFrame(frameIndex);
+            Core::GetRenderer().submitFrame(frameIndex);
+        }
+    });
+
     while (Core::updateCore()) {
+        const uint32_t frameIndex = Core::currentFrameIndex;
+
         if(Lca::Input::keyX.pressed){
             uint32_t sphereMeshId = Core::GetAssetManager().getMeshId("sphere");
             uint32_t cubeMeshId = Core::GetAssetManager().getMeshId("cube2");
@@ -113,9 +138,23 @@ int main() {
 
         std::cout << "Framerate: " << 1.f / Time::deltaTime << " FPS" << std::endl;
         world.progress();
-        Core::GetRenderer().recordFrame();
-        Core::GetRenderer().submitFrame();
+
+        while(renderHasWork.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+
+        renderFrameIndex.store(frameIndex, std::memory_order_relaxed);
+        renderHasWork.store(true, std::memory_order_release);
+
+        Core::currentFrameIndex = (Core::currentFrameIndex + 1) % Core::MAX_FRAMES_IN_FLIGHT;
     }
+
+    while(renderHasWork.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+
+    renderShouldStop.store(true, std::memory_order_release);
+    renderThread.join();
 
     Core::GetAssetManager().shutdown();
     Core::GetRenderer().shutdown();

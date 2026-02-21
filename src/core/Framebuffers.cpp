@@ -11,33 +11,34 @@ namespace Lca
 
         void createFramebuffers()
         {
-
-            framebuffers.colorImage = 
-            createImage
-            (vkExtent2D.width, vkExtent2D.height,
-            vkSurfaceFormatKHR.format,
-            VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT |
-            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-            vkSampleCountFlagBits,
-            VK_IMAGE_ASPECT_COLOR_BIT);
-
-
-            framebuffers.depthImage = 
-            createImage
-            (vkExtent2D.width, vkExtent2D.height,
-            depthVkFormat,
-            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-            vkSampleCountFlagBits,
-            VK_IMAGE_ASPECT_DEPTH_BIT);
-
             framebuffers.vkFramebuffers.resize(swapchain.vkImages.size());
+            framebuffers.colorImages.resize(swapchain.vkImages.size());
+            framebuffers.depthImages.resize(swapchain.vkImages.size());
 
             for(size_t i = 0; i < framebuffers.vkFramebuffers.size(); i++)
             {
+                framebuffers.colorImages[i] = 
+                createImage
+                (vkExtent2D.width, vkExtent2D.height,
+                vkSurfaceFormatKHR.format,
+                VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT |
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                vkSampleCountFlagBits,
+                VK_IMAGE_ASPECT_COLOR_BIT);
+
+
+                framebuffers.depthImages[i] = 
+                createImage
+                (vkExtent2D.width, vkExtent2D.height,
+                depthVkFormat,
+                VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                vkSampleCountFlagBits,
+                VK_IMAGE_ASPECT_DEPTH_BIT);
+
                 std::vector<VkImageView> attachments = 
                 {
-                    framebuffers.colorImage.vkImageView,
-                    framebuffers.depthImage.vkImageView,
+                    framebuffers.colorImages[i].vkImageView,
+                    framebuffers.depthImages[i].vkImageView,
                     swapchain.vkImageViews[i]
                 };
 
@@ -76,9 +77,14 @@ namespace Lca
             }
 
             framebuffers.vkFramebuffers.clear();
+            for(size_t i = 0; i < framebuffers.depthImages.size(); i++)
+            {
+                destroyImage(framebuffers.depthImages[i]);
+                destroyImage(framebuffers.colorImages[i]);
+            }
 
-            destroyImage(framebuffers.depthImage);
-            destroyImage(framebuffers.colorImage);
+            framebuffers.depthImages.clear();
+            framebuffers.colorImages.clear();
         }
     }
 }

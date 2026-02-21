@@ -9,8 +9,8 @@ namespace Lca
     {
         struct Framebuffers
         {
-            Image colorImage;
-            Image depthImage;
+            std::vector<Image> colorImages;
+            std::vector<Image> depthImages;
             std::vector<VkFramebuffer> vkFramebuffers{};
         };
 

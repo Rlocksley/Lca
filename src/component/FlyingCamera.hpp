@@ -45,7 +45,7 @@ namespace Lca
                     position += deltaPosition * (1.f/deltaPosition.length()) * speed * Time::deltaTime;
                 }
 
-                Core::GetRenderer().updateCamera(position, direction, fov, nearClip, farClip);
+                Core::GetRenderer().updateCamera(Core::currentFrameIndex, position, direction, fov, nearClip, farClip);
             }
             // new static lookAt()
             static glm::vec2 lookAt(const glm::vec3& position,

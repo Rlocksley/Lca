@@ -9,19 +9,22 @@ namespace Lca {
 		UberCullPipeline::UberCullPipeline(const std::string& computeShaderPath)
 			: ComputePipeline(computeShaderPath) {
 
-			addUniformBuffer(0, GetRenderer().getCameraBuffer(), VK_SHADER_STAGE_COMPUTE_BIT);
-			addStorageBuffer(1, GetRenderer().getObjectInstanceBuffer(), VK_SHADER_STAGE_COMPUTE_BIT);
-			addStorageBuffer(2, GetRenderer().getModelMatrixBuffer(), VK_SHADER_STAGE_COMPUTE_BIT);
-			addStorageBuffer(3, GetAssetManager().getMeshInfoBuffer(), VK_SHADER_STAGE_COMPUTE_BIT);
-			addStorageBuffer(4, GetRenderer().getDrawCountBuffer(), VK_SHADER_STAGE_COMPUTE_BIT);
-			addBufferArray(
-				5,
-				GetRenderer().getIndirectBuffers(),
-				GetRenderer().getMaxShaderCount(),
-				GetRenderer().getDummyIndirectVkBuffer(),
-				VK_SHADER_STAGE_COMPUTE_BIT
-			);
-			addStorageBuffer(6, GetRenderer().getShaderCapacityBuffer(), VK_SHADER_STAGE_COMPUTE_BIT);
+			for(uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+				addUniformBuffer(i, 0, GetRenderer().getCameraBuffer(i), VK_SHADER_STAGE_COMPUTE_BIT);
+				addStorageBuffer(i, 1, GetRenderer().getObjectInstanceBuffer(i), VK_SHADER_STAGE_COMPUTE_BIT);
+				addStorageBuffer(i, 2, GetRenderer().getModelMatrixBuffer(i), VK_SHADER_STAGE_COMPUTE_BIT);
+				addStorageBuffer(i, 3, GetAssetManager().getMeshInfoBuffer(), VK_SHADER_STAGE_COMPUTE_BIT);
+				addStorageBuffer(i, 4, GetRenderer().getDrawCountBuffer(i), VK_SHADER_STAGE_COMPUTE_BIT);
+				addBufferArray(
+					i,
+					5,
+					GetRenderer().getIndirectBuffers(i),
+					GetRenderer().getMaxShaderCount(),
+					GetRenderer().getDummyIndirectVkBuffer(),
+					VK_SHADER_STAGE_COMPUTE_BIT
+				);
+				addStorageBuffer(i, 6, GetRenderer().getShaderCapacityBuffer(), VK_SHADER_STAGE_COMPUTE_BIT);
+			}
 		}
 
 		void UberCullPipeline::build() {

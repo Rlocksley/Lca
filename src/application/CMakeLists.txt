@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.16.3)
 project(LCA)
 
 add_library(lca_app STATIC
-
+    Application.cpp
 )
 
 target_include_directories(lca_app PUBLIC ../core ../flecs ../component)

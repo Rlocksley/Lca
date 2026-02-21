@@ -118,32 +118,33 @@ namespace Lca
             destroyBuffer(dualBuffer.buffer);
         }
 
-        SlotBuffer createSlotBuffer
+
+        SlotBufferGPU createSlotBufferGPU
         (uint32_t numberElements, uint32_t elementSize,
-        VkBufferUsageFlags usage){
-            SlotBuffer slotBuffer;
-            slotBuffer.size = 0;
-            slotBuffer.interface = createBufferInterface(
+        VkBufferUsageFlags usage)
+        {
+            SlotBufferGPU slotBufferGPU;
+            slotBufferGPU.interface = createBufferInterface(
                 numberElements,
                 elementSize,
                 usage | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
             );
-            slotBuffer.buffer = createBuffer(
+            slotBufferGPU.buffer = createBuffer(
                 numberElements,
                 elementSize,
                 usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT
             );
-            return slotBuffer;
+            return slotBufferGPU;
         }
 
-        void destroySlotBuffer(SlotBuffer& slotBuffer){
-            destroyBufferInterface(slotBuffer.interface);
-            destroyBuffer(slotBuffer.buffer);
-            slotBuffer.size = 0;
-            slotBuffer.freeSlotIndices.clear();
+        void destroySlotBufferGPU(SlotBufferGPU& slotBufferGPU)
+        {
+            destroyBufferInterface(slotBufferGPU.interface);
+            destroyBuffer(slotBufferGPU.buffer);
         }
 
-/*
+        /*
+
         Buffer createBuffer
         (uint32_t numberElements, uint32_t elementSize,
         VkBufferUsageFlags usage)

@@ -1,103 +1,59 @@
 #pragma once
-#include <iostream>
-#include <memory>
-#include <functional>
-#include <string>
-#include <thread>
-#include <atomic>
-#include <chrono>
 
-#include "Global.hpp"
 #include "Core.hpp"
+#include "Renderer.hpp"
+#include "AssetManager.hpp"
 #include "flecs.h"
 #include "Level.hpp"
-#include "GameWorld.hpp"
-#include "LoadingScreen.hpp"
+#include <thread>
+#include <mutex>
+#include <atomic>
+#include <string>
+#include <memory>
 
+namespace Lca {
 
-// --- The Application Class (Multi-World Version) ---
-namespace Rx{
-    class GameWorld;
-    class LoadingScreen;
-    class Application {
-    public:
-        // Application state to control the main loop
-        enum class State {
-            LOADING,
-            RUNNING_GAME,
-            QUITTING
-        };
+class Application {
+public:
+    Application(const std::string& title, int width, int height);
+    virtual ~Application();
 
-        // Level class remains the same abstract interface
-        
+    // Start the application loop
+    void run();
 
-        Application();
+    // Request to load a level directly
+    void loadLevel(std::shared_ptr<Level> level);
 
-        ~Application();
+protected:
+    // Called once at startup
+    virtual void onInit() {}
+    
+    // Called when a level starts loading. Set up your loading screen entities here.
+    // The worldMutex is already locked when this is called.
+    virtual void onLoadingScreenSetup() {}
+    
+    // Called when loading is complete and the level is ready to play.
 
-        template<typename Comp>
-        Application& registerComponent(const std::string& name);
+    // The worldMutex is already locked when this is called.
+    // Note: All non-persistent entities (including loading screen entities) 
+    // will be automatically destroyed right after this function returns.
+    virtual void onLevelReady() {}
+    
+    // Called every frame before world.progress()
+    virtual void onUpdate() {}
 
+    flecs::world world;
+    std::recursive_mutex worldMutex;
 
-        template <typename GW, typename FirstLevel>
-        Application& addGameWorld();
+private:
+    void loadingWorker(std::shared_ptr<Level> level);
 
-        template <typename LS>
-        Application& addLoadingWorld();
+    std::atomic<bool> isLoading;
+    std::atomic<bool> loadingComplete;
+    std::shared_ptr<Level> pendingLevel;
+    std::shared_ptr<Level> currentLevel;
 
-        // The main application loop, now a state machine.
-        void run();
-        void setState(State newState);
+    std::thread loadingThread;
+};
 
-    private:
-        flecs::world game;
-        flecs::world loading;
-        // --- State-specific loop functions ---
-
-        void runLoading();
-
-        void runGame();
-
-        
-
-        // --- Member Variables ---
-        std::unique_ptr<GameWorld> gameWorld{ nullptr };
-        std::unique_ptr<GameWorldBase> loadingWorld{ nullptr };
-        
-        // State management
-        State state;
-
-    };
-}
-
-
-namespace Rx{
-
-    template<typename Comp>
-    Application& Application::registerComponent(const std::string& name){
-        game.component<Comp>(name.c_str());
-        loading.component<Comp>(name.c_str());
-        return *this;
-    }
-
-     template <typename GW, typename FirstLevel>
-        Application& Application::addGameWorld() {
-                static_assert(std::is_base_of<GameWorld, GW>::value, "GameWorld must be a subclass of Rx::GameWorld");
-                gameWorld = std::make_unique<GW>(*this, game);
-                std::cout << "[Application] Game World created." << std::endl;
-                // Set the initial level to load.
-                gameWorld->requestInitialLevel<FirstLevel>();
-
-                return *this;
-            }
-
-        template <typename LS>
-        Application& Application::addLoadingWorld() {
-            static_assert(std::is_base_of<LoadingScreen, LS>::value, "LoadingScreen must be a subclass of Rx::LoadingScreen");
-            loadingWorld = std::make_unique<LS>(*this, loading);
-            std::cout << "LoadingWorld::loadGlobal." << std::endl;
-            loadingWorld->loadGlobal();
-
-            return *this;
-        }
-}
+} // namespace Lca

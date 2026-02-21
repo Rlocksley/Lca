@@ -11,7 +11,7 @@ namespace Lca
 
         void getQueue();
         void submitSingleCommand(SingleCommand command);
-        void submitGraphicsCommand(Command command);
-        void presentGraphics(Command command);
+        void submitGraphicsCommand(Command command, uint32_t frameIndex);
+        void presentGraphics(Command command, uint32_t frameIndex);
     }
 }

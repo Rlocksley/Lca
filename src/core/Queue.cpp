@@ -63,7 +63,7 @@ namespace Lca
             "vkResetFences")
         }
 
-        void submitGraphicsCommand(Command command)
+        void submitGraphicsCommand(Command command, uint32_t frameIndex)
         {
             std::vector<VkPipelineStageFlags> stageFlags = 
             {
@@ -74,11 +74,11 @@ namespace Lca
             submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
             submitInfo.pWaitDstStageMask = stageFlags.data();
             submitInfo.waitSemaphoreCount = 1;
-            submitInfo.pWaitSemaphores = &swapchain.imageAvailableSemaphores[swapchain.currentSemaphoreIndex];
+            submitInfo.pWaitSemaphores = &swapchain.imageAvailableSemaphores[frameIndex];
             submitInfo.commandBufferCount = 1;
             submitInfo.pCommandBuffers = &command.vkCommandBuffer;
             submitInfo.signalSemaphoreCount = 1;
-            submitInfo.pSignalSemaphores = &swapchain.renderFinishedSemaphores[swapchain.currentSemaphoreIndex];
+            submitInfo.pSignalSemaphores = &swapchain.renderFinishedSemaphores[swapchain.imageIndex];
             
             LCA_CHECK_VULKAN
             (vkQueueSubmit
@@ -90,12 +90,14 @@ namespace Lca
             "vkQueueSubmit")
         }
 
-        void presentGraphics(Command command)
+        void presentGraphics(Command command, uint32_t frameIndex)
         {
+            (void)frameIndex;
+
             VkPresentInfoKHR presentInfo{};
             presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
             presentInfo.waitSemaphoreCount = 1;
-            presentInfo.pWaitSemaphores = &swapchain.renderFinishedSemaphores[swapchain.currentSemaphoreIndex];
+            presentInfo.pWaitSemaphores = &swapchain.renderFinishedSemaphores[swapchain.imageIndex];
             presentInfo.swapchainCount = 1;
             presentInfo.pSwapchains = &swapchain.vkSwapchainKHR;
             presentInfo.pImageIndices = &swapchain.imageIndex;
@@ -106,9 +108,6 @@ namespace Lca
             &presentInfo),
             "presentGraphics",
             "vkQueuePresentKHR")
-            
-            // Cycle to next semaphore pair
-            swapchain.currentSemaphoreIndex = (swapchain.currentSemaphoreIndex + 1) % swapchain.imageAvailableSemaphores.size();
         }
     }
 }

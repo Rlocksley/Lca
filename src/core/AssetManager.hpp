@@ -47,8 +47,8 @@ namespace Lca{
             Buffer vertexBuffer;
             Buffer indexBuffer;
             
-            SlotBuffer materials;
-            SlotBuffer meshInfos;
+            SlotBufferGPU materials;
+            SlotBufferGPU meshInfos;
             
             std::array<Texture, MAX_TEXTURES> textures;
             std::array<bool, MAX_TEXTURES> textureSlotOwned;

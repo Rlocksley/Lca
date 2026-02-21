@@ -21,8 +21,8 @@ namespace Lca{
         void AssetManager::init(){
             vertexBuffer = createBuffer(MAX_VERTICES, sizeof(Vertex::Mesh), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
             indexBuffer = createBuffer(MAX_INDICES, sizeof(uint32_t), VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-            materials = createSlotBuffer(MAX_MATERIALS, sizeof(Material), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-            meshInfos = createSlotBuffer(MAX_MESHES, sizeof(MeshInfo), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+            materials = createSlotBufferGPU(MAX_MATERIALS, sizeof(Material), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+            meshInfos = createSlotBufferGPU(MAX_MESHES, sizeof(MeshInfo), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
             currentVertexOffset = 0;
             currentIndexOffset = 0;
@@ -63,8 +63,8 @@ namespace Lca{
             freeVertexRanges.clear();
             freeIndexRanges.clear();
 
-            destroySlotBuffer(meshInfos);
-            destroySlotBuffer(materials);
+            destroySlotBufferGPU(meshInfos);
+            destroySlotBufferGPU(materials);
 
             destroyBuffer(indexBuffer);
             destroyBuffer(vertexBuffer);

@@ -20,8 +20,10 @@ namespace Lca
             VkFence vkFence;
         };
 
+        const inline uint32_t MAX_FRAMES_IN_FLIGHT = 2;
+        inline uint32_t currentFrameIndex = 0;
         inline Lca::Core::SingleCommand singleCommand;
-        inline Lca::Core::Command command;
+        inline std::array<Lca::Core::Command, MAX_FRAMES_IN_FLIGHT> command;
 
         Command createCommand();
         void destroyCommand(Command command);

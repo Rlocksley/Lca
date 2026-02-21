@@ -77,6 +77,11 @@ namespace Lca{
                         }
                     }
                 });
+
+                world.system("Copy Model Matrices to GPU")
+                .each([](){
+                    Core::GetRenderer().copyModelMatricesToGPU(Core::currentFrameIndex);
+                });
             }
 
         };

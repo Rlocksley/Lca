@@ -97,13 +97,14 @@ namespace Lca
                 "vkCreateImageView")
             }
 
-            // Create one semaphore pair for each swapchain image
-            swapchain.imageAvailableSemaphores.resize(numberImages);
-            swapchain.renderFinishedSemaphores.resize(numberImages);
-            
-            for(uint32_t i = 0; i < numberImages; i++)
+            for(uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
             {
                 swapchain.imageAvailableSemaphores[i] = createSemaphore();
+            }
+
+            swapchain.renderFinishedSemaphores.resize(swapchain.vkImages.size());
+            for(size_t i = 0; i < swapchain.vkImages.size(); i++)
+            {
                 swapchain.renderFinishedSemaphores[i] = createSemaphore();
             }
 
@@ -114,15 +115,16 @@ namespace Lca
 
         void destroySwapchain()
         {
-            for(size_t i = 0; i < swapchain.imageAvailableSemaphores.size(); i++)
+            for(size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
             {
                 destroySemaphore(swapchain.imageAvailableSemaphores[i]);
+            }
+            for(size_t i = 0; i < swapchain.renderFinishedSemaphores.size(); i++)
+            {
                 destroySemaphore(swapchain.renderFinishedSemaphores[i]);
             }
-            
-            swapchain.imageAvailableSemaphores.clear();
             swapchain.renderFinishedSemaphores.clear();
-
+            
             for(size_t i = 0; i < swapchain.vkImageViews.size(); i++)
             {
                 vkDestroyImageView
@@ -140,14 +142,14 @@ namespace Lca
             nullptr);
         }
 
-        void getSwapchainImageIndex()
+        void getSwapchainImageIndex(uint32_t frameIndex)
         {
             LCA_CHECK_VULKAN
             (vkAcquireNextImageKHR
             (vkDevice,
             swapchain.vkSwapchainKHR,
             UINT64_MAX,
-            swapchain.imageAvailableSemaphores[swapchain.currentSemaphoreIndex],
+            swapchain.imageAvailableSemaphores[frameIndex],
             nullptr,
             &swapchain.imageIndex),
             "getSwapchainImageIndex",

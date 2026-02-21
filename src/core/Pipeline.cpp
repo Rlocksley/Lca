@@ -13,26 +13,26 @@ namespace Lca {
             destroyOwnedVulkanObjects();
         }
 
-        Pipeline& Pipeline::addUniformBuffer(const uint32_t binding, const BufferInterface& buffer, const VkShaderStageFlags stageFlags) {
-            return addUniformBuffer(binding, buffer.vkBuffer, stageFlags);
+        Pipeline& Pipeline::addUniformBuffer(const uint32_t descriptorSetIndex, const uint32_t binding, const BufferInterface& buffer, const VkShaderStageFlags stageFlags) {
+            return addUniformBuffer(descriptorSetIndex, binding, buffer.vkBuffer, stageFlags);
         }
 
-        Pipeline& Pipeline::addUniformBuffer(const uint32_t binding, const Buffer& buffer, const VkShaderStageFlags stageFlags) {
-            return addUniformBuffer(binding, buffer.vkBuffer, stageFlags);
+        Pipeline& Pipeline::addUniformBuffer(const uint32_t descriptorSetIndex, const uint32_t binding, const Buffer& buffer, const VkShaderStageFlags stageFlags) {
+            return addUniformBuffer(descriptorSetIndex, binding, buffer.vkBuffer, stageFlags);
         }
 
-        Pipeline& Pipeline::addStorageBuffer(const uint32_t binding, const BufferInterface& buffer, const VkShaderStageFlags stageFlags) {
-            return addStorageBuffer(binding, buffer.vkBuffer, stageFlags);
+        Pipeline& Pipeline::addStorageBuffer(const uint32_t descriptorSetIndex, const uint32_t binding, const BufferInterface& buffer, const VkShaderStageFlags stageFlags) {
+            return addStorageBuffer(descriptorSetIndex, binding, buffer.vkBuffer, stageFlags);
         }
 
-        Pipeline& Pipeline::addStorageBuffer(const uint32_t binding, const Buffer& buffer, const VkShaderStageFlags stageFlags) {
-            return addStorageBuffer(binding, buffer.vkBuffer, stageFlags);
+        Pipeline& Pipeline::addStorageBuffer(const uint32_t descriptorSetIndex, const uint32_t binding, const Buffer& buffer, const VkShaderStageFlags stageFlags) {
+            return addStorageBuffer(descriptorSetIndex, binding, buffer.vkBuffer, stageFlags);
         }
 
-        Pipeline& Pipeline::addBufferArray(const uint32_t binding, const std::vector<Buffer>& buffers, const VkShaderStageFlags stageFlags) {
+        Pipeline& Pipeline::addBufferArray(const uint32_t descriptorSetIndex, const uint32_t binding, const std::vector<Buffer>& buffers, const VkShaderStageFlags stageFlags) {
             LCA_ASSERT(!buffers.empty(), "Pipeline", "addBufferArray", "Buffer array must contain at least one buffer.")
 
-            DescriptorResource resource{};
+            DescriptorBufferResource resource{};
             resource.binding = binding;
             resource.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             resource.stageFlags = stageFlags;
@@ -44,16 +44,15 @@ namespace Lca {
             resource.bufferSource = nullptr;
             resource.fallbackBuffer = VK_NULL_HANDLE;
             resource.descriptorCount = static_cast<uint32_t>(resource.buffers.size());
-            resource.textures = nullptr;
-            descriptorResources.push_back(resource);
+            descriptorBufferResources[descriptorSetIndex].push_back(resource);
             return *this;
         }
 
-        Pipeline& Pipeline::addBufferArray(const uint32_t binding, const std::vector<Buffer>& buffers, const uint32_t descriptorCount, const VkBuffer fallbackBuffer, const VkShaderStageFlags stageFlags) {
+        Pipeline& Pipeline::addBufferArray(const uint32_t descriptorSetIndex, const uint32_t binding, const std::vector<Buffer>& buffers, const uint32_t descriptorCount, const VkBuffer fallbackBuffer, const VkShaderStageFlags stageFlags) {
             LCA_ASSERT(descriptorCount > 0, "Pipeline", "addBufferArray", "Descriptor count must be greater than zero.")
             LCA_ASSERT(fallbackBuffer != VK_NULL_HANDLE, "Pipeline", "addBufferArray", "Fallback buffer must be valid.")
 
-            DescriptorResource resource{};
+            DescriptorBufferResource resource{};
             resource.binding = binding;
             resource.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             resource.stageFlags = stageFlags;
@@ -62,56 +61,55 @@ namespace Lca {
             resource.bufferSource = &buffers;
             resource.fallbackBuffer = fallbackBuffer;
             resource.descriptorCount = descriptorCount;
-            resource.textures = nullptr;
-            descriptorResources.push_back(resource);
+            descriptorBufferResources[descriptorSetIndex].push_back(resource);
             return *this;
         }
 
-        Pipeline& Pipeline::addUniformBuffer(const uint32_t binding, VkBuffer buffer, const VkShaderStageFlags stageFlags) {
-            DescriptorResource resource{};
+        Pipeline& Pipeline::addUniformBuffer(const uint32_t descriptorSetIndex, const uint32_t binding, VkBuffer buffer, const VkShaderStageFlags stageFlags) {
+            DescriptorBufferResource resource{};
             resource.binding = binding;
             resource.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
             resource.stageFlags = stageFlags;
             resource.buffer = buffer;
             resource.descriptorCount = 1;
-            resource.textures = nullptr;
-            descriptorResources.push_back(resource);
+            descriptorBufferResources[descriptorSetIndex].push_back(resource);
             return *this;
         }
 
-        Pipeline& Pipeline::addStorageBuffer(const uint32_t binding, VkBuffer buffer, const VkShaderStageFlags stageFlags) {
-            DescriptorResource resource{};
+        Pipeline& Pipeline::addStorageBuffer(const uint32_t descriptorSetIndex, const uint32_t binding, VkBuffer buffer, const VkShaderStageFlags stageFlags) {
+            DescriptorBufferResource resource{};
             resource.binding = binding;
             resource.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             resource.stageFlags = stageFlags;
             resource.buffer = buffer;
             resource.descriptorCount = 1;
-            resource.textures = nullptr;
-            descriptorResources.push_back(resource);
+            descriptorBufferResources[descriptorSetIndex].push_back(resource);
             return *this;
         }
 
         Pipeline& Pipeline::addTextureArrayInternal(const uint32_t binding, const Texture* textures, uint32_t textureCount, const VkShaderStageFlags stageFlags) {
             LCA_ASSERT(textureCount > 0, "Pipeline", "addTextureArray", "Texture array must contain at least one texture.")
-            DescriptorResource resource{};
+            DescriptorTextureResource resource{};
             resource.binding = binding;
             resource.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             resource.stageFlags = stageFlags;
-            resource.buffer = VK_NULL_HANDLE;
-            resource.descriptorCount = textureCount;
             resource.textures = textures;
-            descriptorResources.push_back(resource);
+            resource.descriptorCount = textureCount;
+            descriptorTextureResources.push_back(resource);
             return *this;
         }
 
         void Pipeline::resetBaseVulkanObjects() {
-            if (descriptorSet != VK_NULL_HANDLE) {
-                    LCA_CHECK_VULKAN(
-                        vkFreeDescriptorSets(vkDevice, vkDescriptorPool, 1, &descriptorSet),
-                        "Pipeline::resetBaseVulkanObjects",
-                        "vkFreeDescriptorSets"
-                    )
-                descriptorSet = VK_NULL_HANDLE;
+            
+            for(auto& descriptorSet : descriptorSets) {
+                if (descriptorSet != VK_NULL_HANDLE) {
+                        LCA_CHECK_VULKAN(
+                            vkFreeDescriptorSets(vkDevice, vkDescriptorPool, 1, &descriptorSet),
+                            "Pipeline::resetBaseVulkanObjects",
+                            "vkFreeDescriptorSets"
+                        )
+                    descriptorSet = VK_NULL_HANDLE;
+                }
             }
 
             if (pipelineLayout != VK_NULL_HANDLE) {
@@ -137,35 +135,29 @@ namespace Lca {
         void Pipeline::build() {
             resetBaseVulkanObjects();
 
-            std::sort(
-                descriptorResources.begin(),
-                descriptorResources.end(),
-                [](const DescriptorResource& a, const DescriptorResource& b) {
-                    return a.binding < b.binding;
-                }
-            );
-
-            for (size_t i = 1; i < descriptorResources.size(); ++i) {
-                LCA_ASSERT(
-                    descriptorResources[i - 1].binding != descriptorResources[i].binding,
-                    "Pipeline",
-                    "build",
-                    "Duplicate descriptor binding detected."
-                )
-            }
-
             std::vector<VkDescriptorSetLayoutBinding> layoutBindings;
-            layoutBindings.reserve(descriptorResources.size());
+            layoutBindings.reserve(descriptorBufferResources[0].size() + descriptorTextureResources.size());
 
-            for (const auto& resource : descriptorResources) {
+            for (const auto& bufferResource : descriptorBufferResources[0]) {
                 VkDescriptorSetLayoutBinding layoutBinding{};
-                layoutBinding.binding = resource.binding;
-                layoutBinding.descriptorType = resource.type;
-                layoutBinding.descriptorCount = resource.descriptorCount;
-                layoutBinding.stageFlags = resource.stageFlags;
+                layoutBinding.binding = bufferResource.binding;
+                layoutBinding.descriptorType = bufferResource.type;
+                layoutBinding.descriptorCount = bufferResource.descriptorCount;
+                layoutBinding.stageFlags = bufferResource.stageFlags;
                 layoutBinding.pImmutableSamplers = nullptr;
                 layoutBindings.push_back(layoutBinding);
             }
+
+            for (const auto& textureResource : descriptorTextureResources) {
+                VkDescriptorSetLayoutBinding layoutBinding{};
+                layoutBinding.binding = textureResource.binding;
+                layoutBinding.descriptorType = textureResource.type;
+                layoutBinding.descriptorCount = textureResource.descriptorCount;
+                layoutBinding.stageFlags = textureResource.stageFlags;
+                layoutBinding.pImmutableSamplers = nullptr;
+                layoutBindings.push_back(layoutBinding);
+            }
+
 
             VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCreateInfo{};
             descriptorSetLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -181,11 +173,13 @@ namespace Lca {
             VkDescriptorSetAllocateInfo descriptorSetAllocateInfo{};
             descriptorSetAllocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
             descriptorSetAllocateInfo.descriptorPool = vkDescriptorPool;
-            descriptorSetAllocateInfo.descriptorSetCount = 1;
-            descriptorSetAllocateInfo.pSetLayouts = &descriptorSetLayout;
+            descriptorSetAllocateInfo.descriptorSetCount = MAX_FRAMES_IN_FLIGHT;
+            std::array<VkDescriptorSetLayout, MAX_FRAMES_IN_FLIGHT> descriptorSetLayouts{};
+            descriptorSetLayouts.fill(descriptorSetLayout);
+            descriptorSetAllocateInfo.pSetLayouts = descriptorSetLayouts.data();
 
             LCA_CHECK_VULKAN(
-                vkAllocateDescriptorSets(vkDevice, &descriptorSetAllocateInfo, &descriptorSet),
+                vkAllocateDescriptorSets(vkDevice, &descriptorSetAllocateInfo, descriptorSets.data()),
                 "Pipeline::build",
                 "vkAllocateDescriptorSets"
             )
@@ -207,24 +201,26 @@ namespace Lca {
         }
 
         void Pipeline::updateDescriptorSetWrites() {
-            if (descriptorSet == VK_NULL_HANDLE) {
-                return;
+            for(uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+                updateDescriptorSetWrites(i);
             }
+        }
+        void Pipeline::updateDescriptorSetWrites(uint32_t frameIndex) {
 
             std::vector<VkDescriptorBufferInfo> bufferInfos;
             std::vector<std::vector<VkDescriptorBufferInfo>> bufferInfoArrays;
             std::vector<std::vector<VkDescriptorImageInfo>> imageInfoArrays;
             std::vector<VkWriteDescriptorSet> writes;
 
-            bufferInfos.reserve(descriptorResources.size());
-            bufferInfoArrays.reserve(descriptorResources.size());
-            imageInfoArrays.reserve(descriptorResources.size());
-            writes.reserve(descriptorResources.size());
+            bufferInfos.reserve(descriptorBufferResources[frameIndex].size());
+            bufferInfoArrays.reserve(descriptorBufferResources[frameIndex].size());
+            imageInfoArrays.reserve(descriptorTextureResources.size());
+            writes.reserve(descriptorBufferResources[frameIndex].size() + descriptorTextureResources.size());
 
-            for (const auto& resource : descriptorResources) {
+            for (const auto& resource : descriptorBufferResources[frameIndex]) {
                 VkWriteDescriptorSet write{};
                 write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                write.dstSet = descriptorSet;
+                write.dstSet = descriptorSets[frameIndex];
                 write.dstBinding = resource.binding;
                 write.dstArrayElement = 0;
                 write.descriptorType = resource.type;
@@ -277,24 +273,37 @@ namespace Lca {
                         bufferInfos.push_back(info);
                         write.pBufferInfo = &bufferInfos.back();
                     }
-                } else if (resource.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
-                    imageInfoArrays.emplace_back(resource.descriptorCount);
-                    auto& infos = imageInfoArrays.back();
-                    LCA_ASSERT(resource.textures != nullptr, "Pipeline", "updateDescriptorSetWrites", "Texture array pointer is null.")
 
-                    for (uint32_t i = 0; i < resource.descriptorCount; ++i) {
-                        const Texture* selectedTexture = &(resource.textures[i]);
+                    writes.push_back(write);
+                }else{
+                    LCA_LOGE("Pipeline", "updateDescriptorSetWrites", "Unsupported descriptor type in buffer resources.")
+                }
+            }  
 
-                        VkDescriptorImageInfo info{};
-                        info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                        info.imageView = selectedTexture->vkImageView;
-                        info.sampler = selectedTexture->vkSampler;
-                        infos[i] = info;
-                    }
+            for(auto& textureResource : descriptorTextureResources) {
+                VkWriteDescriptorSet write{};
+                write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                write.dstSet = descriptorSets[frameIndex];
+                write.dstBinding = textureResource.binding;
+                write.dstArrayElement = 0;
+                write.descriptorType = textureResource.type;
+                write.descriptorCount = textureResource.descriptorCount;
 
-                    write.pImageInfo = infos.data();
+                imageInfoArrays.emplace_back(textureResource.descriptorCount);
+                auto& infos = imageInfoArrays.back();
+                LCA_ASSERT(textureResource.textures != nullptr, "Pipeline", "updateDescriptorSetWrites", "Texture array pointer is null.")
+
+                for (uint32_t i = 0; i < textureResource.descriptorCount; ++i) {
+                    const Texture* selectedTexture = &(textureResource.textures[i]);
+
+                    VkDescriptorImageInfo info{};
+                    info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                    info.imageView = selectedTexture->vkImageView;
+                    info.sampler = selectedTexture->vkSampler;
+                    infos[i] = info;
                 }
 
+                write.pImageInfo = infos.data();
                 writes.push_back(write);
             }
 

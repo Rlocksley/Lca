@@ -20,8 +20,9 @@ namespace Core
         createAllocator();
         createDescriptorPool();
 
-
-        Core::command = createCommand();
+        for(uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            command[i] = createCommand();
+        }
 
         Core::singleCommand = createSingleCommand();
 
@@ -55,7 +56,9 @@ namespace Core
         //destroyEye();
 
         destroySingleCommand(Core::singleCommand);   
-        destroyCommand(Core::command);
+        for(uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            destroyCommand(command[i]);
+        }
 
         
         destroyDescriptorPool();
@@ -69,7 +72,7 @@ namespace Core
 
     bool updateCore()
     {
-        Lca::Core::waitForCommand(Lca::Core::command);
+        Lca::Core::waitForCommand(Lca::Core::command[currentFrameIndex]);
 
         glfwPollEvents();
         
