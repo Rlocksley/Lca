@@ -2,6 +2,9 @@
 #include "Time.hpp"
 #include "Input.hpp"
 #include "Mesh.hpp"
+#include "Hidden.hpp"
+#include "Persistent.hpp"
+#include "Device.hpp"
 #include <iostream>
 
 namespace Lca {
@@ -21,6 +24,7 @@ Application::~Application() {
     if (loadingThread.joinable()) {
         loadingThread.join();
     }
+    vkDeviceWaitIdle(Core::vkDevice);
     Core::GetAssetManager().shutdown();
     Core::GetRenderer().shutdown();
     Core::destroyCore();
@@ -38,12 +42,12 @@ void Application::loadLevel(std::shared_ptr<Level> level) {
         
         // 1. Hide persistent entities so they don't render during loading
         world.defer_begin();
-        world.each<Persistent>([](flecs::entity e, Persistent& per) {
+        world.each<Lca::Component::Persistent>([](flecs::entity e, const Lca::Component::Persistent& per) {
             e.add<Component::Hidden>();
         });
         world.defer_end();
 
-        // 2. Cleanup old level (deletes non-persistent entities)
+        // 2. Cleanup old level entities
         if (currentLevel) {
             currentLevel->cleanupScene(world);
         }
@@ -81,10 +85,11 @@ void Application::run() {
             }
 
             const uint32_t frameIndex = renderFrameIndex.load(std::memory_order_relaxed);
-            renderHasWork.store(false, std::memory_order_release);
 
             Core::GetRenderer().recordFrame(frameIndex);
             Core::GetRenderer().submitFrame(frameIndex);
+
+            renderHasWork.store(false, std::memory_order_release);
         }
     });
 
@@ -108,6 +113,15 @@ void Application::run() {
             if (loadingThread.joinable()) {
                 loadingThread.join();
             }
+
+            // Wait for the render thread to finish its current frame
+            while(renderHasWork.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+
+            // Wait for the GPU to finish all submitted work before
+            // destroying any Vulkan resources (buffers, pipelines, etc.)
+            vkDeviceWaitIdle(Core::vkDevice);
             
             {
                 std::lock_guard<std::recursive_mutex> lock(worldMutex);
@@ -117,18 +131,19 @@ void Application::run() {
 
                 // 2. Show persistent entities again
                 world.defer_begin();
-                world.each<Persistent>([](flecs::entity e, Persistent& per) {
-                    e.remove<Component::Hidden>();
-                });
-                
-                // Delete all entities that do not have the Persistent tag (e.g. loading screen entities)
-                auto q = world.query_builder<>().without<Persistent>().build();
-                q.each([](flecs::entity e) {
-                    e.destruct();
+                world.each<Lca::Component::Persistent>([](flecs::entity e, const Lca::Component::Persistent& per) {
+                    e.remove<Lca::Component::Hidden>();
                 });
                 world.defer_end();
+                
+                // 3. Delete all non-persistent user entities (loading screen)
+                Level::deleteNonPersistentEntities(world);
 
-                // 3. Setup new level scene
+                // 4. Update pipeline descriptor sets now that new assets are loaded
+                //    (must happen on the main thread after GPU is idle)
+                Core::GetRenderer().updatePipelineDescriptorSets();
+
+                // 5. Setup new level scene
                 pendingLevel->setupScene(world);
                 currentLevel = pendingLevel;
                 pendingLevel = nullptr;

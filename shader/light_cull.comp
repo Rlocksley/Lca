@@ -1,0 +1,267 @@
+#version 460
+
+// ============================================================
+// Forward+ Light Culling Compute Shader
+// ============================================================
+// Tiles the screen into TILE_SIZE x TILE_SIZE pixel groups.
+// Each tile builds a view-space frustum, reads min/max depth,
+// and tests every point-light sphere against that frustum.
+// Visible light indices are written to a global per-tile list.
+//
+// Integration notes
+// -----------------
+// * The depth texture MUST be a resolved, single-sample copy of
+//   the MSAA depth attachment (resolve it before dispatching
+//   this shader).
+// * Light positions are expected in WORLD space; the shader
+//   transforms them to view space with ubo.view.
+// * Dispatch with:
+//     groupCountX = (screenWidth  + TILE_SIZE - 1) / TILE_SIZE
+//     groupCountY = (screenHeight + TILE_SIZE - 1) / TILE_SIZE
+//     groupCountZ = 1
+// ============================================================
+
+#define TILE_SIZE 16
+#define MAX_LIGHTS_PER_TILE 256
+
+layout(local_size_x = TILE_SIZE, local_size_y = TILE_SIZE, local_size_z = 1) in;
+
+// -----------------------------------------------------------
+// Structures
+// -----------------------------------------------------------
+
+struct PointLight {
+    vec4 position;   // xyz = world position
+    vec4 color;      // rgb = colour, a = unused
+    vec4 intensity;  // x = intensity / radius, y = radius, z/w = unused
+};
+
+// -----------------------------------------------------------
+// Descriptor Bindings  (set = 0)
+// -----------------------------------------------------------
+
+// Camera / projection data
+layout(set = 0, binding = 0) uniform CameraUBO {
+    mat4 projection;       // Projection matrix
+    mat4 view;             // View matrix (world → view)
+    mat4 inverseProjection;// Inverse of projection
+    vec2 screenSize;       // Width, height in pixels
+    uint lightCount;       // Number of active point lights
+    float nearClip;        // Near plane distance
+    float farClip;         // Far plane distance
+    float pad0;
+} ubo;
+
+// Resolved single-sample depth texture
+layout(set = 0, binding = 1) uniform sampler2D depthMap;
+
+// Point-light SSBO (world-space positions, read-only)
+layout(std430, set = 0, binding = 2) readonly buffer LightBuffer {
+    PointLight lights[];
+};
+
+// Per-tile visible light index list
+// Layout: for tile (tx,ty) at linear index  tid = ty * tileCountX + tx
+//   lightIndices[ tid * (MAX_LIGHTS_PER_TILE + 1) + 0 ]  = count
+//   lightIndices[ tid * (MAX_LIGHTS_PER_TILE + 1) + 1.. ] = light indices
+layout(std430, set = 0, binding = 3) buffer TileLightIndices {
+    uint lightIndices[];
+};
+
+// -----------------------------------------------------------
+// Shared Memory
+// -----------------------------------------------------------
+
+// Depth bounds reduction (using uint bit-cast for atomics)
+shared uint s_MinDepthUint;
+shared uint s_MaxDepthUint;
+
+// View-space depth bounds for this tile
+shared float s_MinDepthView;
+shared float s_MaxDepthView;
+
+// 4 side planes of the tile frustum (view space, normal pointing inward)
+shared vec4 s_FrustumPlanes[4];
+
+// Visible light accumulation
+shared uint s_TileLightCount;
+shared uint s_TileLightList[MAX_LIGHTS_PER_TILE];
+
+// -----------------------------------------------------------
+// Helpers
+// -----------------------------------------------------------
+
+// Linearise clip-space depth [0,1] → view-space Z (negative, towards camera -Z)
+// Uses the engine's projection matrix (Vulkan [0,1] depth, left-handed).
+float clipToViewZ(float d) {
+    vec4 clip = vec4(0.0, 0.0, d, 1.0);
+    vec4 vs   = ubo.inverseProjection * clip;
+    return vs.z / vs.w;
+}
+
+// Screen UV [0,1] → view-space direction on the near/far plane.
+// z component of ndc is set to 1.0 (far plane).
+vec3 screenToView(vec2 uv) {
+    vec2 ndc = uv * 2.0 - 1.0;
+    vec4 clip = vec4(ndc, 1.0, 1.0);
+    vec4 vs   = ubo.inverseProjection * clip;
+    return vs.xyz / vs.w;
+}
+
+// Build a plane from 3 points (normal = cross(p1-p0, p2-p0), pointing inward).
+// D = 0 because the camera (eye) sits at the origin in view space.
+vec4 makePlane(vec3 a, vec3 b, vec3 c) {
+    vec3 n = normalize(cross(b - a, c - a));
+    return vec4(n, -dot(n, a));
+}
+
+// Signed distance from a point to a plane.
+float distToPlane(vec4 plane, vec3 point) {
+    return dot(plane.xyz, point) + plane.w;
+}
+
+// -----------------------------------------------------------
+// Main
+// -----------------------------------------------------------
+void main() {
+    ivec2 pixelPos    = ivec2(gl_GlobalInvocationID.xy);
+    uint  threadIndex = gl_LocalInvocationIndex; // 0..255
+
+    // --------------------------------------------------
+    // 1. Initialise shared memory (single thread)
+    // --------------------------------------------------
+    if (threadIndex == 0) {
+        s_MinDepthUint = 0xFFFFFFFFu;
+        s_MaxDepthUint = 0u;
+        s_TileLightCount = 0u;
+    }
+    barrier();
+
+    // --------------------------------------------------
+    // 2. Per-pixel depth read + min/max reduction
+    // --------------------------------------------------
+    float depth = 1.0; // far plane fallback
+    if (pixelPos.x < int(ubo.screenSize.x) && pixelPos.y < int(ubo.screenSize.y)) {
+        depth = texelFetch(depthMap, pixelPos, 0).r;
+    }
+
+    // Bit-cast to uint for atomic min/max.
+    // Works correctly for IEEE-754 positive floats in [0,1].
+    uint depthUint = floatBitsToUint(depth);
+    atomicMin(s_MinDepthUint, depthUint);
+    atomicMax(s_MaxDepthUint, depthUint);
+
+    barrier();
+
+    // --------------------------------------------------
+    // 3. Build tile frustum (thread 0 only)
+    // --------------------------------------------------
+    if (threadIndex == 0) {
+        // Convert depth bounds back to float, then to view-space Z.
+        float minDepthClip = uintBitsToFloat(s_MinDepthUint);
+        float maxDepthClip = uintBitsToFloat(s_MaxDepthUint);
+
+        float z0 = clipToViewZ(minDepthClip);
+        float z1 = clipToViewZ(maxDepthClip);
+
+        // In a left-handed, -Z forward view space the "near" Z is
+        // the algebraically larger value (closer to 0) and "far"
+        // is more negative.  Store them so min < max.
+        s_MinDepthView = min(z0, z1);
+        s_MaxDepthView = max(z0, z1);
+
+        // Tile corners in UV space [0,1]
+        vec2 tileId   = vec2(gl_WorkGroupID.xy);
+        vec2 tileSize = vec2(gl_WorkGroupSize.xy);
+
+        vec2 uvMin = (tileId * tileSize)              / ubo.screenSize;
+        vec2 uvMax = ((tileId + vec2(1.0)) * tileSize) / ubo.screenSize;
+
+        // Unproject the 4 corners to view-space directions
+        vec3 viewBL = screenToView(vec2(uvMin.x, uvMin.y));
+        vec3 viewBR = screenToView(vec2(uvMax.x, uvMin.y));
+        vec3 viewTL = screenToView(vec2(uvMin.x, uvMax.y));
+        vec3 viewTR = screenToView(vec2(uvMax.x, uvMax.y));
+
+        vec3 eye = vec3(0.0);
+
+        // 4 side planes, normals pointing INWARD
+        s_FrustumPlanes[0] = makePlane(eye, viewTL, viewBL); // Left
+        s_FrustumPlanes[1] = makePlane(eye, viewBR, viewTR); // Right
+        s_FrustumPlanes[2] = makePlane(eye, viewTR, viewTL); // Top
+        s_FrustumPlanes[3] = makePlane(eye, viewBL, viewBR); // Bottom
+    }
+    barrier();
+
+    // --------------------------------------------------
+    // 4. Parallel light culling
+    // --------------------------------------------------
+    uint threadCount = gl_WorkGroupSize.x * gl_WorkGroupSize.y; // 256
+    uint passCount   = (ubo.lightCount + threadCount - 1u) / threadCount;
+
+    for (uint pass = 0u; pass < passCount; ++pass) {
+        uint lightIdx = pass * threadCount + threadIndex;
+
+        if (lightIdx >= ubo.lightCount) {
+            continue;
+        }
+
+        // Fetch light and transform position to view space
+        PointLight light  = lights[lightIdx];
+        vec3 worldPos     = light.position.xyz;
+        float radius      = light.intensity.y;  // radius stored in intensity.y
+
+        vec4 viewPos4     = ubo.view * vec4(worldPos, 1.0);
+        vec3 center       = viewPos4.xyz;
+
+        bool visible = true;
+
+        // 4a. Depth (Z-axis) overlap test
+        //     Sphere Z range: [center.z - radius, center.z + radius]
+        //     Tile Z range:   [s_MinDepthView, s_MaxDepthView]
+        if (center.z - radius > s_MaxDepthView ||
+            center.z + radius < s_MinDepthView) {
+            visible = false;
+        }
+
+        // 4b. Side-plane half-space tests
+        if (visible) {
+            for (int p = 0; p < 4; ++p) {
+                if (distToPlane(s_FrustumPlanes[p], center) < -radius) {
+                    visible = false;
+                    break;
+                }
+            }
+        }
+
+        // 4c. Append to per-tile shared list
+        if (visible) {
+            uint slot = atomicAdd(s_TileLightCount, 1u);
+            if (slot < MAX_LIGHTS_PER_TILE) {
+                s_TileLightList[slot] = lightIdx;
+            }
+        }
+    }
+    barrier();
+
+    // --------------------------------------------------
+    // 5. Write shared list to global tile buffer
+    // --------------------------------------------------
+    // Clamp to max in case more lights were found than we can store
+    uint finalCount = min(s_TileLightCount, MAX_LIGHTS_PER_TILE);
+
+    // Tile linear index
+    uint tilesX   = (uint(ubo.screenSize.x) + TILE_SIZE - 1u) / TILE_SIZE;
+    uint tileIdx  = gl_WorkGroupID.y * tilesX + gl_WorkGroupID.x;
+    uint tileBase = tileIdx * (MAX_LIGHTS_PER_TILE + 1u);
+
+    // Thread 0 writes the count
+    if (threadIndex == 0) {
+        lightIndices[tileBase] = finalCount;
+    }
+
+    // All threads cooperatively copy light indices
+    for (uint i = threadIndex; i < finalCount; i += threadCount) {
+        lightIndices[tileBase + 1u + i] = s_TileLightList[i];
+    }
+}

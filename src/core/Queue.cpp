@@ -2,6 +2,7 @@
 #include "PhysicalDevice.hpp"
 #include "Device.hpp"
 #include "Swapchain.hpp"
+#include "Mutex.hpp"
 
 namespace Lca
 {
@@ -37,6 +38,7 @@ namespace Lca
             submitInfo.signalSemaphoreCount = 0;
             submitInfo.pSignalSemaphores = nullptr;
 
+            LCA_VK_MUTEX(
             LCA_CHECK_VULKAN
             (vkQueueSubmit
             (vkQueue,
@@ -60,7 +62,7 @@ namespace Lca
             1,
             &command.vkFence),
             "submitSingleCommand",
-            "vkResetFences")
+            "vkResetFences"))
         }
 
         void submitGraphicsCommand(Command command, uint32_t frameIndex)
@@ -80,6 +82,7 @@ namespace Lca
             submitInfo.signalSemaphoreCount = 1;
             submitInfo.pSignalSemaphores = &swapchain.renderFinishedSemaphores[swapchain.imageIndex];
             
+            LCA_VK_MUTEX(
             LCA_CHECK_VULKAN
             (vkQueueSubmit
             (vkQueue,
@@ -87,7 +90,7 @@ namespace Lca
             &submitInfo,
             command.vkFence),
             "submitGraphicsCommand",
-            "vkQueueSubmit")
+            "vkQueueSubmit"))
         }
 
         void presentGraphics(Command command, uint32_t frameIndex)
@@ -102,12 +105,13 @@ namespace Lca
             presentInfo.pSwapchains = &swapchain.vkSwapchainKHR;
             presentInfo.pImageIndices = &swapchain.imageIndex;
 
+            LCA_VK_MUTEX(
             LCA_CHECK_VULKAN
             (vkQueuePresentKHR
             (vkQueue,
             &presentInfo),
             "presentGraphics",
-            "vkQueuePresentKHR")
+            "vkQueuePresentKHR"))
         }
     }
 }

@@ -3,7 +3,7 @@
 
 namespace Lca{
     namespace Core{
-    inline std::mutex vulkanCommandMutex; // Global mutex for thread safety
+    inline std::recursive_mutex vulkanCommandMutex; // Global mutex for thread safety
 }
 }
 

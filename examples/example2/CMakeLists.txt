@@ -1,4 +1,4 @@
-# LCA Example 1/CMakeLists.txt
+# LCA Example 2/CMakeLists.txt
 
 # Set the minimum required version of CMake.
 cmake_minimum_required(VERSION 3.15)
@@ -7,16 +7,16 @@ cmake_minimum_required(VERSION 3.15)
 project(LCA VERSION 1.0 LANGUAGES CXX)
 
 # --- Build The Main Executable ---
-# Define the main executable target, "LCA Example 1".
-add_executable(lca_example1 main.cpp)
+# Define the main executable target, "LCA Example 2".
+add_executable(lca_example2 main.cpp)
 
 # --- Link All Libraries ---
-# Link LCA Example 1 against all the libraries it needs. Modern CMake uses imported targets
+# Link LCA Example 2 against all the libraries it needs. Modern CMake uses imported targets
 # (like Vulkan::Vulkan, glm::glm, glfw) which also handle include directories automatically.
 
-target_include_directories(lca_example1 PUBLIC ../../src/core ../../src/component ../../src/application ../../src/shape)
+target_include_directories(lca_example2 PUBLIC ../../src/core ../../src/component ../../src/application ../../src/shape)
 
-target_link_libraries(lca_example1 PRIVATE
+target_link_libraries(lca_example2 PRIVATE
     # Our internal libraries
     lca_core
     lca_component

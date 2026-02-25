@@ -4,6 +4,7 @@
 #include "flecs.h"
 #include "Transform.hpp"
 #include "Renderer.hpp"
+#include "Persistent.hpp"
 
 namespace Lca{
     namespace Component {
@@ -45,13 +46,15 @@ namespace Lca{
                     modelMatrix.rotation.w = transform.rotation.w;
                     
                     transformID.id = Core::GetRenderer().addModelMatrix(modelMatrix);
-                });
+                })
+                .add<Lca::Component::PersistentSystem>();
 
                 world.observer<Lca::Component::TransformID>()
                 .event(flecs::OnRemove)
                 .each([](flecs::entity e, Lca::Component::TransformID& transformID) {
                     Core::GetRenderer().removeModelMatrix(transformID.id);
-                });
+                })
+                .add<Lca::Component::PersistentSystem>();
 
                 world.system<Lca::Component::Transform, Lca::Component::TransformID>()
                 .without<Lca::Component::Static>()
@@ -76,12 +79,14 @@ namespace Lca{
                             renderer.updateModelMatrix(transformIDs[i].id, modelMatrix);
                         }
                     }
-                });
+                })
+                .add<Lca::Component::PersistentSystem>();
 
                 world.system("Copy Model Matrices to GPU")
                 .each([](){
                     Core::GetRenderer().copyModelMatricesToGPU(Core::currentFrameIndex);
-                });
+                })
+                .add<Lca::Component::PersistentSystem>();
             }
 
         };

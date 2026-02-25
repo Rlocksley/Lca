@@ -5,10 +5,9 @@
 #include "TransformID.hpp"
 #include "Transform.hpp"
 #include "Renderer.hpp"
-
+#include "Hidden.hpp"
 namespace Lca{
     namespace Component{
-        struct Hidden {};
 
         struct Mesh{
             uint32_t meshID;
@@ -47,7 +46,8 @@ namespace Lca{
                             uint32_t id = Core::GetRenderer().addObjectInstance(instance);
                             e.set<Lca::Component::MeshRender>({ id });
                         }
-                    });
+                    })
+                    .add<Lca::Component::PersistentSystem>();
 
                 world.observer<const Lca::Component::Mesh>()
                     .event(flecs::OnRemove)
@@ -57,7 +57,8 @@ namespace Lca{
                             Core::GetRenderer().removeObjectInstance(meshRender.objectInstanceID);
                             e.remove<Lca::Component::MeshRender>();
                         }
-                    });
+                    })
+                    .add<Lca::Component::PersistentSystem>();
 
                 world.observer<const Lca::Component::Hidden>()
                     .event(flecs::OnAdd)
@@ -67,7 +68,8 @@ namespace Lca{
                             Core::GetRenderer().removeObjectInstance(meshRender.objectInstanceID);
                             e.remove<Lca::Component::MeshRender>();
                         }
-                    });
+                    })
+                    .add<Lca::Component::PersistentSystem>();
 
                 world.observer<const Lca::Component::Hidden>()
                     .event(flecs::OnRemove)
@@ -75,12 +77,14 @@ namespace Lca{
                         if(e.has<Lca::Component::Mesh>() && e.has<Lca::Component::Transform>() && e.has<Lca::Component::TransformID>()){
                             e.modified<Lca::Component::Mesh>();
                         }
-                    });
+                    })
+                    .add<Lca::Component::PersistentSystem>();
 
                 world.system("Copy Object Instances to GPU  ")
                 .each([](){
                     Core::GetRenderer().copyObjectInstancesToGPU(Core::currentFrameIndex);
-                });
+                })
+                .add<Lca::Component::PersistentSystem>();
             }
         };
     }

@@ -73,10 +73,11 @@ namespace Lca
                 world.component<Lca::Component::FlyingCamera>();
 
                 world.system<Lca::Component::FlyingCamera>()
+                    .without<Lca::Component::Hidden>()
                     .each([](flecs::entity e, Lca::Component::FlyingCamera& camera) {
-                     
                         camera.update();
-                    });
+                    })
+                    .add<Lca::Component::PersistentSystem>();
             }
         };
     }

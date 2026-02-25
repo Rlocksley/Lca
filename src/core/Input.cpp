@@ -108,7 +108,7 @@ namespace Lca
 
             cursor.deltaPosition =  cursor.position - lastPosition;
 
-            std::cout << "Cursor Position: (" << cursor.position.x-(Core::windowWidth/2.f) << ", " << cursor.position.y - (Core::windowHeight/2.f) << ")\n";
+            //std::cout << "Cursor Position: (" << cursor.position.x-(Core::windowWidth/2.f) << ", " << cursor.position.y - (Core::windowHeight/2.f) << ")\n";
         }
 
         void scrollCallback(GLFWwindow* window, double xoffset, double yoffset)

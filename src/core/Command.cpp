@@ -62,7 +62,6 @@ namespace Lca
 
         void waitForCommand(Command command)
         {
-            LCA_VK_MUTEX(
             LCA_CHECK_VULKAN
             (vkWaitForFences
             (vkDevice,
@@ -76,7 +75,7 @@ namespace Lca
             (vkDevice,
             1, &command.vkFence),
             "waitForCommand",
-            "vkResetFences"));
+            "vkResetFences")
         }
 
         
