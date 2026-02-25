@@ -22,10 +22,10 @@
 #include "Command.hpp"
 
 #include "Swapchain.hpp"
-#include "RenderPass.hpp"
+//#include "RenderPass.hpp"
 #include "Framebuffers.hpp"
 
-#include "Light.hpp"
+//#include "Light.hpp"
 
 #include "DescriptorSetLayouts.hpp"
 #include "PipelineLayouts.hpp"

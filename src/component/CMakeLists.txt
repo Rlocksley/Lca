@@ -11,7 +11,7 @@ Mesh.hpp
 Mesh.cpp
 FlyingCamera.hpp
 FlyingCamera.cpp
-
+Light.hpp
 )
 
 target_include_directories(lca_component PUBLIC ../core ../flecs)

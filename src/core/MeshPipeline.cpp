@@ -14,6 +14,7 @@ namespace Lca {
                 addStorageBuffer(i, 1, GetRenderer().getObjectInstanceBuffer(i), VK_SHADER_STAGE_VERTEX_BIT);
                 addStorageBuffer(i, 2, GetRenderer().getModelMatrixBuffer(i), VK_SHADER_STAGE_VERTEX_BIT);
                 addStorageBuffer(i, 3, GetAssetManager().getMaterialBuffer(), VK_SHADER_STAGE_FRAGMENT_BIT);
+                addStorageBuffer(i, 5, GetRenderer().getLightBuffer(i), VK_SHADER_STAGE_FRAGMENT_BIT);
             }
             addTextureArray(4, GetAssetManager().getTextures(), VK_SHADER_STAGE_FRAGMENT_BIT);
 

@@ -8,7 +8,8 @@
 #include "Window.hpp"
 #include "Command.hpp"
 #include "Swapchain.hpp"
-
+#include "Framebuffers.hpp"
+#include "PhysicalDevice.hpp"
 namespace Lca{
     namespace Core{
 
@@ -23,6 +24,8 @@ namespace Lca{
                 
                 modelMatricesGPU[i] = createDualBuffer(Lca::Core::MAX_MODEL_MATRICES, sizeof(ModelMatrix), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
                 
+                lightsGPU[i] = createDualBuffer(Lca::Core::MAX_LIGHTS + 1, sizeof(Light), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+
                 cameraBuffer[i] = createDualBuffer(1, sizeof(Camera), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
 
                 drawCounts[i] = createBuffer(Lca::Core::MAX_SHADERS, sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
@@ -34,14 +37,35 @@ namespace Lca{
 
             uberCullPipeline = std::make_unique<UberCullPipeline>("shader/uber_cull.comp.spv");
             uberCullPipeline->build();
+
+            GraphicsPipelineConfig depthPipelineConfig{};
+            depthPipelineConfig.vertexShader = "shader/depth.vert.spv";
+            
+            depthPipelineConfig.depthBiasConstantFactor = 1.25f;
+            depthPipelineConfig.depthBiasClamp = 0.0f;
+            depthPipelineConfig.depthBiasSlopeFactor = 1.75f;
+
+            depthPipelineConfig.sampleCount = VK_SAMPLE_COUNT_1_BIT;
+            depthPipelineConfig.minSampleShading = 1.0f;
+
+            depthPipelineConfig.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+            depthPipelineConfig.minDepthBounds = 0.0f;
+            depthPipelineConfig.maxDepthBounds = 1.0f;
+
+            depthPipelineConfig.hasColorAttachments = true;
+
+            depthPipeline = std::make_unique<DepthPipeline>(depthPipelineConfig);
+            depthPipeline->build();
         }
 
         void Renderer::shutdown(){
             uberCullPipeline.reset();
+            depthPipeline.reset();
 
             for(uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
                 destroyDualBuffer(objectInstancesGPU[i]);
                 destroyDualBuffer(modelMatricesGPU[i]);
+                destroyDualBuffer(lightsGPU[i]);
                 destroyDualBuffer(cameraBuffer[i]);
                 destroyBuffer(drawCounts[i]);
             }
@@ -71,6 +95,7 @@ namespace Lca{
             objectInstancesGPU[frameIndex].recordSync(command[frameIndex]);
             modelMatricesGPU[frameIndex].recordSync(command[frameIndex]);
             cameraBuffer[frameIndex].recordSync(command[frameIndex]);
+            lightsGPU[frameIndex].recordSync(command[frameIndex]);
             GetAssetManager().recordSync(command[frameIndex]);
 
             vkCmdFillBuffer(command[frameIndex].vkCommandBuffer, drawCounts[frameIndex].vkBuffer, 0, VK_WHOLE_SIZE, 0);
@@ -143,8 +168,71 @@ namespace Lca{
                 nullptr
             );
 
-            beginRenderPass(command[frameIndex]);
+            // Use dynamic rendering (vkCmdBeginRendering / vkCmdEndRendering)
             {
+                VkImage swapImage = swapchain.vkImages[swapchain.imageIndex];
+                // Transition swapchain image from UNDEFINED to COLOR_ATTACHMENT_OPTIMAL before rendering
+                VkImageMemoryBarrier swapBarrierInit{};
+                swapBarrierInit.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                swapBarrierInit.srcAccessMask = 0;
+                swapBarrierInit.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                swapBarrierInit.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                swapBarrierInit.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                swapBarrierInit.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                swapBarrierInit.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                swapBarrierInit.image = swapImage;
+                swapBarrierInit.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                swapBarrierInit.subresourceRange.baseMipLevel = 0;
+                swapBarrierInit.subresourceRange.levelCount = 1;
+                swapBarrierInit.subresourceRange.baseArrayLayer = 0;
+                swapBarrierInit.subresourceRange.layerCount = 1;
+
+                vkCmdPipelineBarrier(
+                    command[frameIndex].vkCommandBuffer,
+                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    0,
+                    0, nullptr,
+                    0, nullptr,
+                    1, &swapBarrierInit
+                );
+
+                // Color attachment: use multisampled transient color image and resolve to swapchain view
+                VkRenderingAttachmentInfo colorAttachment{};
+                colorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+                colorAttachment.imageView = framebuffers.colorImages[swapchain.imageIndex].vkImageView;
+                colorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+                colorAttachment.clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+                colorAttachment.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
+                colorAttachment.resolveImageView = swapchain.vkImageViews[swapchain.imageIndex];
+                colorAttachment.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+                // Depth attachment: per-frame transient depth image (must match sample count of colorAttachment)
+                VkRenderingAttachmentInfo depthAttachment{};
+                depthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+                depthAttachment.imageView = framebuffers.depthImages[swapchain.imageIndex].vkImageView;
+                depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+                depthAttachment.clearValue.depthStencil = {1.0f, 0};
+
+                VkRenderingInfo renderingInfo{};
+                renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+                renderingInfo.pNext = nullptr;
+                renderingInfo.flags = 0;
+                renderingInfo.renderArea.offset = {0, 0};
+                renderingInfo.renderArea.extent = vkExtent2D;
+                renderingInfo.layerCount = 1;
+                renderingInfo.viewMask = 0;
+                renderingInfo.colorAttachmentCount = 1;
+                renderingInfo.pColorAttachments = &colorAttachment;
+                renderingInfo.pDepthAttachment = &depthAttachment;
+                renderingInfo.pStencilAttachment = nullptr;
+
+                vkCmdBeginRendering(command[frameIndex].vkCommandBuffer, &renderingInfo);
+
                 const Buffer vertexBuffer = GetAssetManager().getVertexBuffer();
                 const Buffer indexBuffer = GetAssetManager().getIndexBuffer();
 
@@ -188,8 +276,35 @@ namespace Lca{
                         sizeof(VkDrawIndexedIndirectCommand)
                     );
                 }
+
+                vkCmdEndRendering(command[frameIndex].vkCommandBuffer);
+
+                // Transition the swapchain image from COLOR_ATTACHMENT_OPTIMAL to PRESENT_SRC_KHR for presentation
+                VkImageMemoryBarrier swapBarrierPresent{};
+                swapBarrierPresent.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                swapBarrierPresent.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                swapBarrierPresent.dstAccessMask = 0;
+                swapBarrierPresent.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                swapBarrierPresent.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+                swapBarrierPresent.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                swapBarrierPresent.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                swapBarrierPresent.image = swapImage;
+                swapBarrierPresent.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                swapBarrierPresent.subresourceRange.baseMipLevel = 0;
+                swapBarrierPresent.subresourceRange.levelCount = 1;
+                swapBarrierPresent.subresourceRange.baseArrayLayer = 0;
+                swapBarrierPresent.subresourceRange.layerCount = 1;
+
+                vkCmdPipelineBarrier(
+                    command[frameIndex].vkCommandBuffer,
+                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                    0,
+                    0, nullptr,
+                    0, nullptr,
+                    1, &swapBarrierPresent
+                );
             }
-            endRenderPass(command[frameIndex]);
 
             endCommand(command[frameIndex]);
          
@@ -257,6 +372,62 @@ namespace Lca{
             auto it = meshPipelineMap.find(name);
             LCA_ASSERT(it != meshPipelineMap.end(), "Renderer", "getMeshPipelineId", "Mesh pipeline name not found.")
             return it->second;
+        }
+
+        uint32_t Renderer::addLight(const Light& light){
+            uint32_t id;
+            if(!freeLightSlots.empty()){
+                id = freeLightSlots.back();
+                freeLightSlots.pop_back();
+            } else {
+                LCA_ASSERT(lightCount < MAX_LIGHTS, "Renderer", "addLight", "Exceeded MAX_LIGHTS capacity.")
+                id = lightCount++;
+            }
+            lightSlots[id] = light;
+            lightSlotActive[id] = true;
+            lightsDirty = true;
+            return id;
+        }
+
+        void Renderer::updateLight(uint32_t id, const Light& light){
+            LCA_ASSERT(id < MAX_LIGHTS && lightSlotActive[id], "Renderer", "updateLight", "Invalid light ID.")
+            lightSlots[id] = light;
+            lightsDirty = true;
+        }
+
+        void Renderer::removeLight(uint32_t id){
+            LCA_ASSERT(id < MAX_LIGHTS && lightSlotActive[id], "Renderer", "removeLight", "Invalid light ID.")
+            lightSlotActive[id] = false;
+            freeLightSlots.push_back(id);
+            lightsDirty = true;
+        }
+
+        void Renderer::copyLightsToGPU(uint32_t frameIndex){
+            // Layout matches the std430 SSBO in the fragment shader:
+            //   uint lightCount;  // offset 0  (4 bytes)
+            //   <12 bytes padding to align Light to 16>
+            //   Light lights[];   // offset 16
+            auto* mem = static_cast<uint8_t*>(lightsGPU[frameIndex].interface.pMemory);
+
+            // Pack active lights densely after the 16-byte header.
+            auto* dst = reinterpret_cast<Light*>(mem + 16);
+            uint32_t packed = 0;
+            for(uint32_t i = 0; i < lightCount; i++){
+                if(lightSlotActive[i]){
+                    dst[packed++] = lightSlots[i];
+                }
+            }
+            // Zero remaining to avoid stale data
+            if(packed < MAX_LIGHTS){
+                memset(&dst[packed], 0, (MAX_LIGHTS - packed) * sizeof(Light));
+            }
+
+            // Write the packed count into the SSBO header (first 4 bytes).
+            memcpy(mem, &packed, sizeof(uint32_t));
+            // Zero the 12 padding bytes after lightCount.
+            memset(mem + sizeof(uint32_t), 0, 12);
+
+            packedLightCount = packed;
         }
 
         glm::mat4 Renderer::createViewMatrix(const glm::vec3& cameraPosition, const glm::vec3& cameraDirection, const glm::vec3& upDirection)

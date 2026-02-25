@@ -10,9 +10,6 @@ namespace Lca {
 
 		GraphicsPipeline::GraphicsPipeline(const GraphicsPipelineConfig& cfg)
 			: Pipeline(), config(cfg) {
-			if (config.renderPass == VK_NULL_HANDLE) {
-				config.renderPass = vkRenderPass;
-			}
 		}
 
 		void GraphicsPipeline::build() {
@@ -23,26 +20,27 @@ namespace Lca {
 				pipelineHandle() = VK_NULL_HANDLE;
 			}
 
-			LCA_ASSERT(!config.vertexShader.empty(), "GraphicsPipeline", "build", "Vertex shader path must be set.");
-			LCA_ASSERT(!config.fragmentShader.empty(), "GraphicsPipeline", "build", "Fragment shader path must be set.");
-			LCA_ASSERT(config.renderPass != VK_NULL_HANDLE, "GraphicsPipeline", "build", "Render pass must be valid.");
+			std::vector<VkPipelineShaderStageCreateInfo> shaderStages{};
+			{
+				LCA_ASSERT(!config.vertexShader.empty(), "GraphicsPipeline", "build", "Vertex shader path must be set.");
+				Shader vertexShader(config.vertexShader);
+				VkPipelineShaderStageCreateInfo shaderStage{};
+				shaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+				shaderStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+				shaderStage.module = vertexShader.createShaderModule();;
+				shaderStage.pName = "main";
+				shaderStages.push_back(shaderStage);
+			}
 
-			Shader vertexShader(config.vertexShader);
-			Shader fragmentShader(config.fragmentShader);
-
-			VkShaderModule vertexModule = vertexShader.createShaderModule();
-			VkShaderModule fragmentModule = fragmentShader.createShaderModule();
-
-			VkPipelineShaderStageCreateInfo shaderStages[2]{};
-			shaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-			shaderStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-			shaderStages[0].module = vertexModule;
-			shaderStages[0].pName = "main";
-
-			shaderStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-			shaderStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-			shaderStages[1].module = fragmentModule;
-			shaderStages[1].pName = "main";
+			if(!config.fragmentShader.empty()){
+				Shader fragmentShader(config.fragmentShader);
+				VkPipelineShaderStageCreateInfo shaderStage{};
+				shaderStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+				shaderStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+				shaderStage.module = fragmentShader.createShaderModule();
+				shaderStage.pName = "main";
+				shaderStages.push_back(shaderStage);
+			}
 
 			VkPipelineVertexInputStateCreateInfo vertexInputStateCreateInfo{};
 			vertexInputStateCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -68,7 +66,7 @@ namespace Lca {
 
 			VkRect2D scissor{};
 			scissor.offset = {0, 0};
-			scissor.extent = vkExtent2D;
+			scissor.extent = config.extend2D.width > 0 && config.extend2D.height > 0 ? config.extend2D : vkExtent2D;
 
 			VkPipelineViewportStateCreateInfo viewportStateCreateInfo{};
 			viewportStateCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
@@ -89,7 +87,8 @@ namespace Lca {
 
 			VkPipelineMultisampleStateCreateInfo multisampleStateCreateInfo{};
 			multisampleStateCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-			multisampleStateCreateInfo.rasterizationSamples = vkSampleCountFlagBits;
+			multisampleStateCreateInfo.rasterizationSamples = config.sampleCount == VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM ? vkSampleCountFlagBits : config.sampleCount;
+			multisampleStateCreateInfo.minSampleShading = config.minSampleShading;
 			multisampleStateCreateInfo.sampleShadingEnable = VK_FALSE;
 
 			VkPipelineDepthStencilStateCreateInfo depthStencilStateCreateInfo{};
@@ -98,6 +97,8 @@ namespace Lca {
 			depthStencilStateCreateInfo.depthWriteEnable = config.depthWriteEnable ? VK_TRUE : VK_FALSE;
 			depthStencilStateCreateInfo.depthCompareOp = config.depthCompareOp;
 			depthStencilStateCreateInfo.depthBoundsTestEnable = VK_FALSE;
+			depthStencilStateCreateInfo.minDepthBounds = config.minDepthBounds;
+			depthStencilStateCreateInfo.maxDepthBounds = config.maxDepthBounds;
 			depthStencilStateCreateInfo.stencilTestEnable = VK_FALSE;
 
 			VkPipelineColorBlendAttachmentState colorBlendAttachmentState{};
@@ -121,20 +122,41 @@ namespace Lca {
 			colorBlendStateCreateInfo.attachmentCount = 1;
 			colorBlendStateCreateInfo.pAttachments = &colorBlendAttachmentState;
 
+			VkPipelineRenderingCreateInfo renderingInfo{};
+			renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+			// Determine color attachment formats and count
+			uint32_t colorCount = 0;
+			const VkFormat* colorFormats = nullptr;
+			if (config.hasColorAttachments) {
+				if (config.colorAttachments.empty()) {
+					colorCount = 1u;
+					colorFormats = &vkSurfaceFormatKHR.format;
+				} else {
+					colorCount = static_cast<uint32_t>(config.colorAttachments.size());
+					colorFormats = config.colorAttachments.data();
+				}
+			}
+			renderingInfo.colorAttachmentCount = colorCount;
+			renderingInfo.pColorAttachmentFormats = colorFormats;
+			renderingInfo.depthAttachmentFormat = config.depthAttachmentFormat;
+			renderingInfo.stencilAttachmentFormat = VK_FORMAT_UNDEFINED;
+			renderingInfo.viewMask = config.viewMask;
+
 			VkGraphicsPipelineCreateInfo graphicsPipelineCreateInfo{};
 			graphicsPipelineCreateInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-			graphicsPipelineCreateInfo.stageCount = 2;
-			graphicsPipelineCreateInfo.pStages = shaderStages;
+			graphicsPipelineCreateInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+			graphicsPipelineCreateInfo.pStages = shaderStages.data();
 			graphicsPipelineCreateInfo.pVertexInputState = &vertexInputStateCreateInfo;
 			graphicsPipelineCreateInfo.pInputAssemblyState = &inputAssemblyStateCreateInfo;
 			graphicsPipelineCreateInfo.pViewportState = &viewportStateCreateInfo;
 			graphicsPipelineCreateInfo.pRasterizationState = &rasterizationStateCreateInfo;
 			graphicsPipelineCreateInfo.pMultisampleState = &multisampleStateCreateInfo;
 			graphicsPipelineCreateInfo.pDepthStencilState = &depthStencilStateCreateInfo;
-			graphicsPipelineCreateInfo.pColorBlendState = &colorBlendStateCreateInfo;
+			graphicsPipelineCreateInfo.pColorBlendState = config.hasColorAttachments ? &colorBlendStateCreateInfo : nullptr;
 			graphicsPipelineCreateInfo.layout = getVkPipelineLayout();
-			graphicsPipelineCreateInfo.renderPass = config.renderPass;
-			graphicsPipelineCreateInfo.subpass = config.subpass;
+			graphicsPipelineCreateInfo.pNext = &renderingInfo;
+			graphicsPipelineCreateInfo.renderPass = VK_NULL_HANDLE; //Using dynamic rendering, so no render pass or subpass
+			graphicsPipelineCreateInfo.subpass = 0;
 			graphicsPipelineCreateInfo.basePipelineHandle = VK_NULL_HANDLE;
 			graphicsPipelineCreateInfo.basePipelineIndex = -1;
 
@@ -144,9 +166,9 @@ namespace Lca {
 				"vkCreateGraphicsPipelines"
 			)
 
-			vkDestroyShaderModule(vkDevice, vertexModule, nullptr);
-			vkDestroyShaderModule(vkDevice, fragmentModule, nullptr);
+			for(auto& shaderStage : shaderStages){
+				vkDestroyShaderModule(vkDevice, shaderStage.module, nullptr);
+			}
 		}
-
 	}
 }

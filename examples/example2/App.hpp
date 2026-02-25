@@ -1,4 +1,5 @@
 #include "Application.hpp"
+#include "Light.hpp"
 #include "Lev.hpp"
 
 class ExampleApp : public Lca::Application {
@@ -38,6 +39,7 @@ protected:
         world.import<Lca::Module::Transform>();
         world.import<Lca::Module::TransformID>();
         world.import<Lca::Module::Mesh>();
+        world.import<Lca::Module::Light>();
         world.import<Lca::Module::FlyingCamera>();
 
         std::shared_ptr<Lca::Level> level = std::make_shared<GameLevel>();

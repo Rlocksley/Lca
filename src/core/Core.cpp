@@ -29,7 +29,7 @@ namespace Core
         //createEye();
 
         createSwapchain();
-        createRenderPass();
+        //createRenderPass();
         createFramebuffers();
 
         //createLightBuffers();
@@ -50,7 +50,7 @@ namespace Core
         //destroyLightBuffers();
         
         destroyFramebuffers();
-        destroyRenderPass();
+        //destroyRenderPass();
         destroySwapchain();
 
         //destroyEye();

@@ -37,8 +37,8 @@ Eye.hpp
 Eye.cpp
 Swapchain.hpp
 Swapchain.cpp
-RenderPass.hpp
-RenderPass.cpp
+#RenderPass.hpp
+#RenderPass.cpp
 Framebuffers.hpp
 Framebuffers.cpp
 Shader.hpp
@@ -47,8 +47,8 @@ DescriptorSetLayouts.hpp
 DescriptorSetLayouts.cpp
 PipelineLayouts.hpp
 PipelineLayouts.cpp
-Light.hpp
-Light.cpp
+#Light.hpp
+#Light.cpp
 Physics.hpp
 Core.hpp
 Core.cpp
@@ -70,6 +70,8 @@ Pipeline.hpp
 Pipeline.cpp
 GraphicsPipeline.hpp
 GraphicsPipeline.cpp
+DepthPipeline.hpp
+DepthPipeline.cpp
 )
 
 

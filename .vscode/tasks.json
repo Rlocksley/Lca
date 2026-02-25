@@ -2,16 +2,16 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "build lca_example2 (Debug)",
+      "label": "build lca_example3 (Debug)",
       "type": "shell",
       "command": "cmake",
       "args": [
         "--build",
-        "${workspaceFolder}/build/examples/example2",
+        "${workspaceFolder}/build/examples/example3",
         "--config",
         "Debug",
         "--target",
-        "lca_example2"
+        "lca_example3"
       ],
       "group": {
         "kind": "build",
@@ -22,16 +22,16 @@
       ]
     },
     {
-      "label": "build lca_example2 (Release)",
+      "label": "build lca_example3 (Release)",
       "type": "shell",
       "command": "cmake",
       "args": [
         "--build",
-        "${workspaceFolder}/build/examples/example2",
+        "${workspaceFolder}/build/examples/example3",
         "--config",
         "Release",
         "--target",
-        "lca_example2"
+        "lca_example3"
       ],
       "group": {
         "kind": "build",

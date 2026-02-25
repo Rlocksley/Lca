@@ -11,11 +11,11 @@ namespace Lca
 
         void createFramebuffers()
         {
-            framebuffers.vkFramebuffers.resize(swapchain.vkImages.size());
+            //framebuffers.vkFramebuffers.resize(swapchain.vkImages.size());
             framebuffers.colorImages.resize(swapchain.vkImages.size());
             framebuffers.depthImages.resize(swapchain.vkImages.size());
 
-            for(size_t i = 0; i < framebuffers.vkFramebuffers.size(); i++)
+            for(size_t i = 0; i < swapchain.vkImages.size(); i++)
             {
                 framebuffers.colorImages[i] = 
                 createImage
@@ -35,30 +35,30 @@ namespace Lca
                 vkSampleCountFlagBits,
                 VK_IMAGE_ASPECT_DEPTH_BIT);
 
-                std::vector<VkImageView> attachments = 
-                {
-                    framebuffers.colorImages[i].vkImageView,
-                    framebuffers.depthImages[i].vkImageView,
-                    swapchain.vkImageViews[i]
-                };
+                // std::vector<VkImageView> attachments = 
+                // {
+                //     framebuffers.colorImages[i].vkImageView,
+                //     framebuffers.depthImages[i].vkImageView,
+                //     swapchain.vkImageViews[i]
+                // };
 
-                VkFramebufferCreateInfo createInfo{};
-                createInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-                createInfo.renderPass = vkRenderPass;
-                createInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
-                createInfo.pAttachments = attachments.data();
-                createInfo.width = vkExtent2D.width;
-                createInfo.height = vkExtent2D.height;
-                createInfo.layers = 1;
+                // VkFramebufferCreateInfo createInfo{};
+                // createInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+                // createInfo.renderPass = vkRenderPass;
+                // createInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+                // createInfo.pAttachments = attachments.data();
+                // createInfo.width = vkExtent2D.width;
+                // createInfo.height = vkExtent2D.height;
+                // createInfo.layers = 1;
 
-                LCA_CHECK_VULKAN
-                (vkCreateFramebuffer
-                (vkDevice,
-                &createInfo,
-                nullptr,
-                &framebuffers.vkFramebuffers[i]),
-                "createFramebuffers",
-                "vkCreateFramebuffer")
+                // LCA_CHECK_VULKAN
+                // (vkCreateFramebuffer
+                // (vkDevice,
+                // &createInfo,
+                // nullptr,
+                // &framebuffers.vkFramebuffers[i]),
+                // "createFramebuffers",
+                // "vkCreateFramebuffer")
             }
 
             #ifdef LCA_DEBUG
@@ -68,15 +68,16 @@ namespace Lca
         
         void destroyFramebuffers()
         {
-            for(size_t i = 0; i < framebuffers.vkFramebuffers.size(); i++)
-            {
-                vkDestroyFramebuffer
-                (vkDevice,
-                framebuffers.vkFramebuffers[i],
-                nullptr);
-            }
+            // for(size_t i = 0; i < framebuffers.vkFramebuffers.size(); i++)
+            // {
+            //     vkDestroyFramebuffer
+            //     (vkDevice,
+            //     framebuffers.vkFramebuffers[i],
+            //     nullptr);
+            // }
 
-            framebuffers.vkFramebuffers.clear();
+            // framebuffers.vkFramebuffers.clear();
+            
             for(size_t i = 0; i < framebuffers.depthImages.size(); i++)
             {
                 destroyImage(framebuffers.depthImages[i]);

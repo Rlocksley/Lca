@@ -8,6 +8,7 @@
 #include "Pipeline.hpp"
 #include "MeshPipeline.hpp"
 #include "UberCullPipeline.hpp"
+#include "DepthPipeline.hpp"
 
 namespace Lca {
     namespace Core {
@@ -19,12 +20,25 @@ namespace Lca {
         const inline uint32_t MAX_INDICES =  1048576;   
         const inline uint32_t MAX_SHADERS = 1024;
         const inline uint32_t MAX_TEXTURES = 1024;
+        const inline uint32_t MAX_LIGHTS = 1024;
 
         struct Camera{
             glm::vec4 frustumPlanes[6];
             glm::mat4 viewProjection;
             glm::vec3 camPos;
             glm::vec3 camDir;
+        };
+
+        // Type constants for Light::position.w
+        constexpr float LIGHT_TYPE_POINT       = 0.0f;
+        constexpr float LIGHT_TYPE_SPOT        = 1.0f;
+        constexpr float LIGHT_TYPE_DIRECTIONAL = 2.0f;
+
+        struct Light{
+            glm::vec4 position;  // xyz = world position, w = type (0=point, 1=spot, 2=directional)
+            glm::vec4 direction; // xyz = direction (spot/directional), w = unused
+            glm::vec4 color;     // rgb = color, a = intensity
+            glm::vec4 params;    // x = radius, y = cos(innerCutoff), z = cos(outerCutoff), w = unused
         };
 
         struct ModelMatrix{
@@ -68,6 +82,14 @@ namespace Lca {
 
             void updatePipelineDescriptorSets();
 
+            // Light management (packed, rebuilt every frame)
+            uint32_t addLight(const Light& light);
+            void updateLight(uint32_t id, const Light& light);
+            void removeLight(uint32_t id);
+            void copyLightsToGPU(uint32_t frameIndex);
+            uint32_t getLightCount() const { return packedLightCount; }
+            const Buffer getLightBuffer(uint32_t frameIndex) const { return lightsGPU[frameIndex].buffer; }
+
             const Buffer getObjectInstanceBuffer(uint32_t frameIndex) const { return objectInstancesGPU[frameIndex].buffer; }
             const Buffer getModelMatrixBuffer(uint32_t frameIndex) const { return modelMatricesGPU[frameIndex].buffer; }
             const Buffer getDrawCountBuffer(uint32_t frameIndex) const { return drawCounts[frameIndex]; }
@@ -91,9 +113,22 @@ namespace Lca {
             SlotBuffer<ModelMatrix, MAX_MODEL_MATRICES> modelMatrices;
             std::array<DualBuffer, MAX_FRAMES_IN_FLIGHT> modelMatricesGPU;
             
+            // Lights use a packed (dense) array, not SlotBuffer.
+            // light_cull.comp iterates lightCount entries assuming no holes.
+            // With MAX_LIGHTS=1024, rebuilding the packed buffer each frame
+            // is ~64KB — trivially cheap vs. wasting compute threads on holes.
+            std::array<Light, MAX_LIGHTS> lightSlots{};
+            std::array<bool, MAX_LIGHTS> lightSlotActive{};
+            uint32_t lightCount{0};
+            std::vector<uint32_t> freeLightSlots;
+            bool lightsDirty{false};
+            uint32_t packedLightCount{0};
+            std::array<DualBuffer, MAX_FRAMES_IN_FLIGHT> lightsGPU;
+
             std::vector<MeshPipeline> meshPipelines;
             std::unordered_map<std::string, uint32_t> meshPipelineMap;
             std::unique_ptr<UberCullPipeline> uberCullPipeline;
+            std::unique_ptr<DepthPipeline> depthPipeline;
             std::array<std::vector<Buffer>, MAX_FRAMES_IN_FLIGHT> indirectBuffers;
             Buffer dummyIndirectBuffer;
             std::array<Buffer, MAX_FRAMES_IN_FLIGHT> drawCounts;

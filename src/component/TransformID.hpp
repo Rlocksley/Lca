@@ -56,7 +56,7 @@ namespace Lca{
                 })
                 .add<Lca::Component::PersistentSystem>();
 
-                world.system<Lca::Component::Transform, Lca::Component::TransformID>()
+                world.system<Lca::Component::Transform, Lca::Component::TransformID>("Non Static Transform Update")
                 .without<Lca::Component::Static>()
                 .run([](flecs::iter& it) {
                     auto& renderer = Core::GetRenderer();

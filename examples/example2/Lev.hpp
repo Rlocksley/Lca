@@ -5,7 +5,15 @@
 #include "Shape.hpp"
 #include "Mesh.hpp"
 #include "FlyingCamera.hpp"
+#include "Light.hpp"
+#include "Time.hpp"
 using namespace Lca;
+
+// Per-light velocity for wandering point lights
+struct LightVelocity {
+    glm::vec3 velocity{0.0f};
+};
+
 class GameLevel : public Lca::Level {
 
 public:
@@ -71,5 +79,44 @@ public:
                     });
             
         }
+
+        // Create 1000 random point lights
+        for (uint32_t i = 0; i < 1000; i++) {
+            auto light = world.entity(("pointlight_" + std::to_string(i)).c_str());
+            light.set(Component::Transform{
+                glm::vec3(random(-100.0f, 100.0f), random(-100.0f, 100.0f), random(-100.0f, 100.0f)),
+                0.0f,
+                glm::vec3(0.0f, 1.0f, 0.0f),
+                glm::vec3(1.0f)
+            });
+            auto mod3 = i % 3;
+            light.set(Component::PointLight{
+                .color     = glm::vec3(mod3 == 0 ? 1.0f : 0.0f, mod3 == 1 ? 1.0f : 0.0f, mod3 == 2 ? 1.0f : 0.0f),
+                .intensity = random(10.0f, 10.0f),
+                .radius    = random(200.0f, 200.0f)
+            });
+            light.set(LightVelocity{
+                glm::vec3(random(-20.0f, 20.0f), random(-20.0f, 20.0f), random(-20.0f, 20.0f))
+            });
+        }
+
+        // System: move point lights randomly, bounce off the [-100,100]³ bounds
+        world.system<Component::Transform, LightVelocity>("Light Movement")
+            .with<Component::PointLight>()
+            .each([](flecs::entity e, Component::Transform& t, LightVelocity& vel) {
+                constexpr float BOUND = 100.0f;
+                t.position += vel.velocity * Time::deltaTime;
+
+                // Bounce off walls
+                for (int axis = 0; axis < 3; axis++) {
+                    if (t.position[axis] > BOUND) {
+                        t.position[axis] = BOUND;
+                        vel.velocity[axis] = -vel.velocity[axis];
+                    } else if (t.position[axis] < -BOUND) {
+                        t.position[axis] = -BOUND;
+                        vel.velocity[axis] = -vel.velocity[axis];
+                    }
+                }
+            });
     }
 };

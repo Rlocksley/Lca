@@ -73,7 +73,7 @@ add_subdirectory(./src/application)
 
 add_subdirectory(./examples/example1)
 add_subdirectory(./examples/example2)
-#add_subdirectory(./examples/example3)
+add_subdirectory(./examples/example3)
 #add_subdirectory(./examples/example4)
 #add_subdirectory(./examples/example5)
 #add_subdirectory(./examples/example6)

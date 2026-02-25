@@ -87,6 +87,18 @@ layout(set = 0, binding = 6) readonly buffer IndirectCapacities {
     uint capacity[];
 } indirectCapacities;
 
+// Binding 7: Depth pre-pass indirect buffer
+// Collects ALL visible objects into a single draw list for the depth-only
+// render pass whose output feeds light_cull.comp.
+layout(set = 0, binding = 7) writeonly buffer DepthPrePassDraws {
+    DrawIndexedIndirectCommand commands[];
+} depthPrePass;
+
+// Binding 8: Depth pre-pass draw count (single atomic uint)
+layout(set = 0, binding = 8) buffer DepthPrePassCounter {
+    uint count;
+} depthPrePassCount;
+
 // ------------------------------------------------------------------
 // Helper Functions
 // ------------------------------------------------------------------
@@ -141,8 +153,22 @@ void main() {
 
     // 4. Frustum Cull with World Sphere
     if (isVisible(vec4(worldCenter, worldRadius))) {
-        
-        // 5. Identify Target Buffer (Shader)
+
+        // 5. Build the Draw Command (shared by both paths)
+        DrawIndexedIndirectCommand cmd;
+        cmd.indexCount    = mesh.indexCount;
+        cmd.instanceCount = 1;             // Assuming 1 instance per draw for MDI
+        cmd.firstIndex    = mesh.firstIndex;
+        cmd.vertexOffset  = mesh.vertexOffset;
+        cmd.firstInstance = gID;           // Pass global ID to Vertex Shader (gl_InstanceIndex)
+
+        // 6. Write to the depth pre-pass buffer (ALL visible objects)
+        uint depthSlot = atomicAdd(depthPrePassCount.count, 1);
+        if (depthSlot < depthPrePass.commands.length()) {
+            depthPrePass.commands[depthSlot] = cmd;
+        }
+
+        // 7. Identify Target Buffer (Shader)
         // 'nonuniformEXT' is required here because obj.shaderID varies 
         // per thread within the same warp/subgroup.
         uint shaderIndex = obj.shaderID; 
@@ -154,21 +180,13 @@ void main() {
             return;
         }
         
-        // 6. Reserve Slot in the format-specific buffer
+        // 8. Reserve Slot in the format-specific buffer
         uint cmdIndex = 0;
         if (!tryReserveCommandSlot(shaderIndex, maxCommands, cmdIndex)) {
             return;
         }
 
-        // 7. Build the Draw Command
-        DrawIndexedIndirectCommand cmd;
-        cmd.indexCount    = mesh.indexCount;
-        cmd.instanceCount = 1;             // Assuming 1 instance per draw for MDI
-        cmd.firstIndex    = mesh.firstIndex;
-        cmd.vertexOffset  = mesh.vertexOffset;
-        cmd.firstInstance = gID;           // Pass global ID to Vertex Shader (gl_InstanceIndex)
-
-        // 8. Write to the specific Indirect Buffer
+        // 9. Write to the specific Indirect Buffer
         // We use the nonuniform index here to select the correct buffer from the array.
         indirectBuffers[nonuniformEXT(shaderIndex)].commands[cmdIndex] = cmd;
     }
