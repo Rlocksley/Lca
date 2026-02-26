@@ -22,7 +22,7 @@ It is tested on Windows but should be easy to port to Linux and Mac because all 
 - glm
 - CMake toolchain to build the project
 
-**Quick Start for Window**
+**Quick Start for Windows**
 - Download Visual Studio Code and install the CMake and C++ plugins
 - Download the Vulkan SDK
 - clone vcpkg in the same directory as your Lca Folder and build vcpkg
