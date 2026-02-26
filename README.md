@@ -2,7 +2,7 @@
 
 Lca is a Vulkan AZDO forward renderer with a simple, high-performance design. 
 
-It uses flecs as the GameLogic ECS API so you can author game logic and scene graphs with flecs while the renderer and AssetManager provide the GPU resources and pipelines.
+It uses flecs as the GameLogic ECS API so you can author game logic and scene graphs with flecs while the Renderer and AssetManager provide the GPU resources and pipelines.
 
 It is tested on Windows but should be easy to port to Linux and Mac because all libraries used are cross platform.
 
@@ -73,6 +73,9 @@ Notes:
         Core::GetRenderer().addMeshPipeline("basic", std::move(meshPipeline), 250000);
 ```
 
+**4) Creating Shaders**
+
+You can use the bound buffers, textures and vertices of mesh_basic.vert and mesh_basic.frag to write your own shaders.
 
 notes:
 - The renderer uses GPU-driven indirect draw/count buffers; when adding pipelines you must provide an upper bound (`maxObjects`) so the renderer can allocate per-frame indirect buffers.
