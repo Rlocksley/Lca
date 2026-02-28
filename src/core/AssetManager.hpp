@@ -43,6 +43,7 @@ namespace Lca{
             const Buffer getVertexBuffer() const { return vertexBuffer; }
             const Buffer getIndexBuffer() const { return indexBuffer; }
             
+            
         private:
             Buffer vertexBuffer;
             Buffer indexBuffer;

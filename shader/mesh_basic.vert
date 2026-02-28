@@ -9,6 +9,7 @@ layout(location = 0) out vec3 outWorldNormal;
 layout(location = 1) out vec4 outColor;
 layout(location = 2) out vec2 outTexCoord;
 layout(location = 3) flat out uint outMaterialId;
+layout(location = 4) out vec3 outWorldPos;
 
 struct CameraData {
     mat4 projView;
@@ -32,9 +33,15 @@ struct ObjectInstance {
 
 layout(set = 0, binding = 0) uniform CameraBuffer {
     vec4 frustumPlanes[6];
+    mat4 projection;       // Projection matrix
+    mat4 view;             // View matrix (world → view)
     mat4 viewProjection;
-    vec3 camPos;
-    vec3 camDir;
+    mat4 inverseProjection;// Inverse of projection
+    vec4 camPos;
+    vec4 camDir;
+    vec2 screenSize;       // Width, height in pixels
+    float nearClip;        // Near plane distance
+    float farClip;         // Far plane distance
 }cam;
 
 layout(set = 0, binding = 1) readonly buffer ObjectBuffer {
@@ -56,4 +63,5 @@ void main() {
     outColor = inColor;
     outTexCoord = inTexCoord;
     outMaterialId = obj.materialID;
+    outWorldPos = worldPos.xyz;
 }

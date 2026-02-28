@@ -56,6 +56,7 @@ namespace Lca
 
         Texture createTexture(uint32_t width, uint32_t height, void* pixels);
         Texture createFontTexture(uint32_t width, uint32_t height, void* pixels);
+        Texture createDepthMap(uint32_t width, uint32_t height);
         void destroyTexture(Texture& texture);
         
         struct ShadowMapArray{

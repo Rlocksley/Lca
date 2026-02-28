@@ -36,7 +36,7 @@ public:
         Shape::Sphere sphere(1, 16, 16, glm::vec3(10.0f), glm::vec4(1.0f));
         Core::GetAssetManager().addMesh("sphere", sphere.getVertices(), sphere.getIndices());
 
-        Core::GetAssetManager().loadTexture("fire", "asset/fire.jpg");
+        Core::GetAssetManager().loadTexture("fire", "asset/water.jpg");
 
         Core::Material material{};
         material.metallic = 1.0f;
@@ -152,11 +152,11 @@ public:
             auto mod3 = i % 3;
             light.set(Component::PointLight{
                 .color     = glm::vec3(mod3 == 0 ? 1.0f : 0.0f, mod3 == 1 ? 1.0f : 0.0f, mod3 == 2 ? 1.0f : 0.0f),
-                .intensity = random(30.0f, 30.0f),
+                .intensity = random(80.0f, 80.0f),
                 .radius    = random(200.0f, 200.0f)
             });
             light.set(LightVelocity{
-                glm::vec3(random(-20.0f, 20.0f), random(-20.0f, 20.0f), random(-20.0f, 20.0f))
+                glm::vec3(random(-200.0f, 200.0f), random(-200.0f, 200.0f), random(-200.0f, 200.0f))
             });
         }
 
@@ -177,6 +177,7 @@ public:
                         vel.velocity[axis] = -vel.velocity[axis];
                     }
                 }
+
             });
     }
 };

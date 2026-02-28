@@ -72,6 +72,8 @@ GraphicsPipeline.hpp
 GraphicsPipeline.cpp
 DepthPipeline.hpp
 DepthPipeline.cpp
+LightCullPipeline.hpp
+LightCullPipeline.cpp
 )
 
 

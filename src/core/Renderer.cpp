@@ -29,6 +29,23 @@ namespace Lca{
                 cameraBuffer[i] = createDualBuffer(1, sizeof(Camera), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
 
                 drawCounts[i] = createBuffer(Lca::Core::MAX_SHADERS, sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+            
+                // Per-frame single-sample depth map used by compute light culling
+                depthMaps[i] = createDepthMap(vkExtent2D.width, vkExtent2D.height);
+                // Per-frame depth pre-pass indirect buffer and its count
+                depthPrePassBuffer[i] = createBuffer(Lca::Core::MAX_OBJECTS, sizeof(VkDrawIndexedIndirectCommand), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+                depthPrePassCountBuffer[i] = createBuffer(1, sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+
+                // Create per-frame tile light index buffers for the light culling compute shader.
+                // Must match shader constants: TILE_SIZE = 16, MAX_LIGHTS_PER_TILE = 256
+                constexpr uint32_t TILE_SIZE = 16u;
+                constexpr uint32_t MAX_LIGHTS_PER_TILE = 256u;
+                const uint32_t tilesX = (vkExtent2D.width + TILE_SIZE - 1u) / TILE_SIZE;
+                const uint32_t tilesY = (vkExtent2D.height + TILE_SIZE - 1u) / TILE_SIZE;
+                const uint32_t entriesPerTile = MAX_LIGHTS_PER_TILE + 1u; // count + indices
+                const uint32_t totalElements = tilesX * tilesY * entriesPerTile;
+                lightIndicesBuffer[i] = createBuffer(totalElements, sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+                
             }
 
             shaderCapacities = createDualBuffer(Lca::Core::MAX_SHADERS, sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -52,15 +69,19 @@ namespace Lca{
             depthPipelineConfig.minDepthBounds = 0.0f;
             depthPipelineConfig.maxDepthBounds = 1.0f;
 
-            depthPipelineConfig.hasColorAttachments = true;
+            depthPipelineConfig.hasColorAttachments = false;
 
             depthPipeline = std::make_unique<DepthPipeline>(depthPipelineConfig);
             depthPipeline->build();
+            
+            lightCullPipeline = std::make_unique<LightCullPipeline>("shader/light_cull.comp.spv");
+            lightCullPipeline->build();
         }
 
         void Renderer::shutdown(){
             uberCullPipeline.reset();
             depthPipeline.reset();
+            lightCullPipeline.reset();
 
             for(uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
                 destroyDualBuffer(objectInstancesGPU[i]);
@@ -68,15 +89,21 @@ namespace Lca{
                 destroyDualBuffer(lightsGPU[i]);
                 destroyDualBuffer(cameraBuffer[i]);
                 destroyBuffer(drawCounts[i]);
+                destroyTexture(depthMaps[i]);
+                destroyBuffer(lightIndicesBuffer[i]);
+                destroyBuffer(depthPrePassBuffer[i]);
+                destroyBuffer(depthPrePassCountBuffer[i]);
             }
             destroyDualBuffer(shaderCapacities);
             destroyBuffer(dummyIndirectBuffer);
+
             for(auto& buffer : indirectBuffers) {
                 for(auto& buf : buffer) {
                     destroyBuffer(buf);
                 }
                 buffer.clear();
             }
+
             meshPipelineMap.clear();
             meshPipelines.clear();
         }
@@ -102,6 +129,10 @@ namespace Lca{
             for (auto& indirectBuffer : indirectBuffers[frameIndex]) {
                 vkCmdFillBuffer(command[frameIndex].vkCommandBuffer, indirectBuffer.vkBuffer, 0, VK_WHOLE_SIZE, 0);
             }
+            // Clear depth pre-pass buffers (indirect list and its count) before Uber cull writes
+            vkCmdFillBuffer(command[frameIndex].vkCommandBuffer, depthPrePassBuffer[frameIndex].vkBuffer, 0, VK_WHOLE_SIZE, 0);
+            vkCmdFillBuffer(command[frameIndex].vkCommandBuffer, depthPrePassCountBuffer[frameIndex].vkBuffer, 0, VK_WHOLE_SIZE, 0);
+            vkCmdFillBuffer(command[frameIndex].vkCommandBuffer, lightIndicesBuffer[frameIndex].vkBuffer, 0, VK_WHOLE_SIZE, 0);
 
             VkMemoryBarrier transferToShaderBarrier{};
             transferToShaderBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -148,8 +179,172 @@ namespace Lca{
                     const uint32_t groupCountX = (objectInstances.getSize() + WORKGROUP_SIZE_X - 1) / WORKGROUP_SIZE_X;
                     vkCmdDispatch(command[frameIndex].vkCommandBuffer, groupCountX, 1, 1);
                 }
+                // Ensure UberCull compute writes (depth pre-pass lists) are
+                // visible to the subsequent depth pre-pass indirect draw.
+                VkMemoryBarrier uberToDepthBarrier{};
+                uberToDepthBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+                uberToDepthBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                uberToDepthBarrier.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+
+                vkCmdPipelineBarrier(
+                    command[frameIndex].vkCommandBuffer,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                    0,
+                    1,
+                    &uberToDepthBarrier,
+                    0,
+                    nullptr,
+                    0,
+                    nullptr
+                );
             }
 
+            // --- Depth pre-pass: render into a single-sample depth map used by light culling ---
+            {
+                // Ensure depth map is transitioned to depth attachment optimal
+                VkImageMemoryBarrier depthBarrierInit{};
+                depthBarrierInit.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                depthBarrierInit.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                depthBarrierInit.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                depthBarrierInit.srcAccessMask = 0;
+                depthBarrierInit.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                depthBarrierInit.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                depthBarrierInit.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                depthBarrierInit.image = depthMaps[frameIndex].vkImage;
+                depthBarrierInit.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+                depthBarrierInit.subresourceRange.baseMipLevel = 0;
+                depthBarrierInit.subresourceRange.levelCount = 1;
+                depthBarrierInit.subresourceRange.baseArrayLayer = 0;
+                depthBarrierInit.subresourceRange.layerCount = 1;
+
+                vkCmdPipelineBarrier(
+                    command[frameIndex].vkCommandBuffer,
+                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                    VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                    0,
+                    0, nullptr,
+                    0, nullptr,
+                    1, &depthBarrierInit
+                );
+
+                // Begin rendering to the depth map only
+                VkRenderingAttachmentInfo depthAttachment{};
+                depthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+                depthAttachment.imageView = depthMaps[frameIndex].vkImageView;
+                depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+                depthAttachment.clearValue.depthStencil = {1.0f, 0};
+
+                VkRenderingInfo depthRenderingInfo{};
+                depthRenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+                depthRenderingInfo.renderArea.offset = {0, 0};
+                depthRenderingInfo.renderArea.extent = vkExtent2D;
+                depthRenderingInfo.layerCount = 1;
+                depthRenderingInfo.viewMask = 0;
+                depthRenderingInfo.colorAttachmentCount = 0;
+                depthRenderingInfo.pColorAttachments = nullptr;
+                depthRenderingInfo.pDepthAttachment = &depthAttachment;
+                depthRenderingInfo.pStencilAttachment = nullptr;
+
+                vkCmdBeginRendering(command[frameIndex].vkCommandBuffer, &depthRenderingInfo);
+
+                // Bind depth pipeline and draw all meshes (indirect buffers per mesh)
+                vkCmdBindPipeline(
+                    command[frameIndex].vkCommandBuffer,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    depthPipeline->getVkPipeline()
+                );
+                VkDescriptorSet depthDesc = depthPipeline->getVkDescriptorSet(frameIndex);
+                vkCmdBindDescriptorSets(
+                    command[frameIndex].vkCommandBuffer,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    depthPipeline->getVkPipelineLayout(),
+                    0,
+                    1,
+                    &depthDesc,
+                    0,
+                    nullptr
+                );
+
+                const Buffer vertexBuffer = GetAssetManager().getVertexBuffer();
+                const Buffer indexBuffer = GetAssetManager().getIndexBuffer();
+                VkBuffer vkVertexBuffer = vertexBuffer.vkBuffer;
+                VkDeviceSize offsets[] = {0};
+                vkCmdBindVertexBuffers(command[frameIndex].vkCommandBuffer, 0, 1, &vkVertexBuffer, offsets);
+                vkCmdBindIndexBuffer(command[frameIndex].vkCommandBuffer, indexBuffer.vkBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+                const uint32_t meshPipelineCount = static_cast<uint32_t>(meshPipelines.size());
+                LCA_ASSERT(meshPipelineCount == static_cast<uint32_t>(indirectBuffers[frameIndex].size()), "Renderer", "recordFrame", "meshPipelines and indirectBuffers size mismatch.");
+
+                // Draw all visible objects using the single depth pre-pass indirect buffer
+                vkCmdDrawIndexedIndirectCount(
+                    command[frameIndex].vkCommandBuffer,
+                    depthPrePassBuffer[frameIndex].vkBuffer,
+                    0,
+                    depthPrePassCountBuffer[frameIndex].vkBuffer,
+                    0,
+                    depthPrePassBuffer[frameIndex].numberElements,
+                    sizeof(VkDrawIndexedIndirectCommand)
+                );
+
+                vkCmdEndRendering(command[frameIndex].vkCommandBuffer);
+
+                // Transition depth map to shader read for the light cull compute shader
+                VkImageMemoryBarrier depthBarrierToRead{};
+                depthBarrierToRead.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                depthBarrierToRead.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                depthBarrierToRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                depthBarrierToRead.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                depthBarrierToRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                depthBarrierToRead.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                depthBarrierToRead.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                depthBarrierToRead.image = depthMaps[frameIndex].vkImage;
+                depthBarrierToRead.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+                depthBarrierToRead.subresourceRange.baseMipLevel = 0;
+                depthBarrierToRead.subresourceRange.levelCount = 1;
+                depthBarrierToRead.subresourceRange.baseArrayLayer = 0;
+                depthBarrierToRead.subresourceRange.layerCount = 1;
+
+                vkCmdPipelineBarrier(
+                    command[frameIndex].vkCommandBuffer,
+                    VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    0,
+                    0, nullptr,
+                    0, nullptr,
+                    1, &depthBarrierToRead
+                );
+            }
+
+            // --- Light cull compute dispatch ---
+            {
+                
+                VkDescriptorSet descriptorSet = lightCullPipeline->getVkDescriptorSet(frameIndex);
+                vkCmdBindPipeline(
+                    command[frameIndex].vkCommandBuffer,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    lightCullPipeline->getVkPipeline()
+                );
+                vkCmdBindDescriptorSets(
+                    command[frameIndex].vkCommandBuffer,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    lightCullPipeline->getVkPipelineLayout(),
+                    0,
+                    1,
+                    &descriptorSet,
+                    0,
+                    nullptr
+                );
+
+                constexpr uint32_t TILE_SIZE = 16u;
+                const uint32_t groupCountX = (vkExtent2D.width + TILE_SIZE - 1u) / TILE_SIZE;
+                const uint32_t groupCountY = (vkExtent2D.height + TILE_SIZE - 1u) / TILE_SIZE;
+                vkCmdDispatch(command[frameIndex].vkCommandBuffer, groupCountX, groupCountY, 1);
+            }
+
+            // Make compute writes (light indices) visible to draw indirect
             VkMemoryBarrier computeToDrawBarrier{};
             computeToDrawBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
             computeToDrawBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -494,18 +689,30 @@ namespace Lca{
         void Renderer::updateCamera(uint32_t frameIndex, glm::vec3 position, glm::vec3 direction, float fov, float nearClip, float farClip)
         {
             Camera cam{};
-            cam.camPos = position;
-            cam.camDir = glm::normalize(direction);
 
-            cam.viewProjection = createProjectionMatrix(
+            // Build projection and view matrices. Include the X matrix used elsewhere
+            // to match the existing viewProjection behavior.
+            glm::mat4 proj = createProjectionMatrix(
                 fov,
-                static_cast<float>(windowWidth) / static_cast<float>(windowHeight),
+                static_cast<float>(vkExtent2D.width) / static_cast<float>(vkExtent2D.height),
                 nearClip,
                 farClip
             );
-            cam.viewProjection *= createXMatrix();
-            cam.viewProjection *= createViewMatrix(position, cam.camDir, glm::vec3(0.f, -1.f, 0.f));
+            glm::mat4 X = createXMatrix();
+            glm::mat4 view = createViewMatrix(position, glm::normalize(direction), glm::vec3(0.f, -1.f, 0.f));
 
+            cam.projection = proj * X;
+            cam.inverseProjection = glm::inverse(cam.projection);
+            cam.view = view;
+            cam.viewProjection = cam.projection * cam.view;
+
+            cam.camPos = glm::vec4(position, 0.0f);
+            cam.camDir = glm::vec4(glm::normalize(direction), 0.0f);
+            cam.screenSize = glm::vec2(static_cast<float>(vkExtent2D.width), static_cast<float>(vkExtent2D.height));
+            cam.nearClip = nearClip;
+            cam.farClip = farClip;
+
+            // Extract and normalize frustum planes from viewProjection
             const glm::vec4 row0(
                 cam.viewProjection[0][0],
                 cam.viewProjection[1][0],
@@ -531,12 +738,12 @@ namespace Lca{
                 cam.viewProjection[3][3]
             );
 
-            cam.frustumPlanes[0] = row3 + row0; // Left   :  x + w >= 0
-            cam.frustumPlanes[1] = row3 - row0; // Right  : -x + w >= 0
-            cam.frustumPlanes[2] = row3 + row1; // Bottom :  y + w >= 0
-            cam.frustumPlanes[3] = row3 - row1; // Top    : -y + w >= 0
-            cam.frustumPlanes[4] = row2;        // Near   :  z >= 0  (Vulkan depth [0,1])
-            cam.frustumPlanes[5] = row3 - row2; // Far    : -z + w >= 0
+            cam.frustumPlanes[0] = row3 + row0; // Left
+            cam.frustumPlanes[1] = row3 - row0; // Right
+            cam.frustumPlanes[2] = row3 + row1; // Bottom
+            cam.frustumPlanes[3] = row3 - row1; // Top
+            cam.frustumPlanes[4] = row2;        // Near
+            cam.frustumPlanes[5] = row3 - row2; // Far
 
             for (glm::vec4& plane : cam.frustumPlanes) {
                 const float normalLength = glm::length(glm::vec3(plane));
@@ -546,6 +753,11 @@ namespace Lca{
             }
 
             memcpy(cameraBuffer[frameIndex].interface.pMemory, &cam, sizeof(Camera));
+        }
+
+        Texture& Renderer::getDepthMap(uint32_t frameIndex) {
+            LCA_ASSERT(frameIndex < MAX_FRAMES_IN_FLIGHT, "Renderer", "getDepthMap", "Frame index out of range.")
+            return depthMaps[frameIndex];
         }
     }
 }

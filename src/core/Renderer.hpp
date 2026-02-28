@@ -9,6 +9,7 @@
 #include "MeshPipeline.hpp"
 #include "UberCullPipeline.hpp"
 #include "DepthPipeline.hpp"
+#include "LightCullPipeline.hpp"
 
 namespace Lca {
     namespace Core {
@@ -24,9 +25,15 @@ namespace Lca {
 
         struct Camera{
             glm::vec4 frustumPlanes[6];
+            glm::mat4 projection;
+            glm::mat4 view;
             glm::mat4 viewProjection;
-            glm::vec3 camPos;
-            glm::vec3 camDir;
+            glm::mat4 inverseProjection;
+            glm::vec4 camPos;        // xyz = world position, w = unused (matches std140 vec3 padded to vec4)
+            glm::vec4 camDir;        // xyz = direction, w = unused
+            glm::vec2 screenSize;    // Width, height in pixels
+            float nearClip;          // Near plane distance
+            float farClip;           // Far plane distance
         };
 
         // Type constants for Light::position.w
@@ -79,6 +86,8 @@ namespace Lca {
             }
             uint32_t addMeshPipeline(const std::string& name, MeshPipeline&& pipeline, uint32_t maxObjects = MAX_OBJECTS);
             uint32_t getMeshPipelineId(const std::string& name) const;
+                std::array<Buffer, MAX_FRAMES_IN_FLIGHT> depthPrePassBuffer;
+                std::array<Buffer, MAX_FRAMES_IN_FLIGHT> depthPrePassCountBuffer;
 
             void updatePipelineDescriptorSets();
 
@@ -93,6 +102,8 @@ namespace Lca {
             const Buffer getObjectInstanceBuffer(uint32_t frameIndex) const { return objectInstancesGPU[frameIndex].buffer; }
             const Buffer getModelMatrixBuffer(uint32_t frameIndex) const { return modelMatricesGPU[frameIndex].buffer; }
             const Buffer getDrawCountBuffer(uint32_t frameIndex) const { return drawCounts[frameIndex]; }
+                const Buffer getDepthPrePassBuffer(uint32_t frameIndex) const { return depthPrePassBuffer[frameIndex]; }
+                const Buffer getDepthPrePassCountBuffer(uint32_t frameIndex) const { return depthPrePassCountBuffer[frameIndex]; }
             const Buffer getShaderCapacityBuffer() const { return shaderCapacities.buffer; }
             const Buffer getIndirectBuffer(uint32_t frameIndex, uint32_t index) const { return indirectBuffers[frameIndex][index]; }
             const std::vector<Buffer>& getIndirectBuffers(uint32_t frameIndex) const { return indirectBuffers[frameIndex]; }
@@ -104,6 +115,8 @@ namespace Lca {
             }
             const Buffer getCameraBuffer(uint32_t frameIndex) const { return cameraBuffer[frameIndex].buffer; }
             void updateCamera(uint32_t frameIndex, glm::vec3 position, glm::vec3 direction, float fov, float nearClip, float farClip);
+            Texture& getDepthMap(uint32_t frameIndex);
+            const Buffer getLightIndicesBuffer(uint32_t frameIndex) const { return lightIndicesBuffer[frameIndex]; }
           
         private:
             
@@ -124,17 +137,21 @@ namespace Lca {
             bool lightsDirty{false};
             uint32_t packedLightCount{0};
             std::array<DualBuffer, MAX_FRAMES_IN_FLIGHT> lightsGPU;
-
+            std::array<Buffer, MAX_FRAMES_IN_FLIGHT> lightIndicesBuffer;
+            std::array<Texture, MAX_FRAMES_IN_FLIGHT> depthMaps;
+            
             std::vector<MeshPipeline> meshPipelines;
             std::unordered_map<std::string, uint32_t> meshPipelineMap;
+            std::array<std::vector<Buffer>, MAX_FRAMES_IN_FLIGHT> indirectBuffers;
             std::unique_ptr<UberCullPipeline> uberCullPipeline;
             std::unique_ptr<DepthPipeline> depthPipeline;
-            std::array<std::vector<Buffer>, MAX_FRAMES_IN_FLIGHT> indirectBuffers;
+            std::unique_ptr<LightCullPipeline> lightCullPipeline;
             Buffer dummyIndirectBuffer;
             std::array<Buffer, MAX_FRAMES_IN_FLIGHT> drawCounts;
             DualBuffer shaderCapacities;
             std::array<DualBuffer, MAX_FRAMES_IN_FLIGHT> cameraBuffer;
 
+            
             glm::mat4 createViewMatrix(const glm::vec3& cameraPosition, const glm::vec3& cameraDirection, const glm::vec3& upDirection);
             glm::mat4 createProjectionMatrix(float fov, float aspectRatio, float nearClip, float farClip);
             glm::mat4 createXMatrix();

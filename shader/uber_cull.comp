@@ -48,9 +48,15 @@ struct MeshInfo {
 // Binding 0: Camera / Frustum Data
 layout(set = 0, binding = 0) uniform CameraData {
     vec4 frustumPlanes[6];
+    mat4 projection;       // Projection matrix
+    mat4 view;             // View matrix (world → view)
     mat4 viewProjection;
-    vec3 camPos;
-    vec3 camDir;
+    mat4 inverseProjection;// Inverse of projection
+    vec4 camPos;
+    vec4 camDir;
+    vec2 screenSize;       // Width, height in pixels
+    float nearClip;        // Near plane distance
+    float farClip;         // Far plane distance
 } cam;
 
 // Binding 1: All Objects in the scene (The "Mega List")

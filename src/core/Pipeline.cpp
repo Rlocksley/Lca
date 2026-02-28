@@ -32,7 +32,7 @@ namespace Lca {
         Pipeline& Pipeline::addBufferArray(const uint32_t descriptorSetIndex, const uint32_t binding, const std::vector<Buffer>& buffers, const VkShaderStageFlags stageFlags) {
             LCA_ASSERT(!buffers.empty(), "Pipeline", "addBufferArray", "Buffer array must contain at least one buffer.")
 
-            DescriptorBufferResource resource{};
+            DescriptorRessource resource{};
             resource.binding = binding;
             resource.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             resource.stageFlags = stageFlags;
@@ -44,7 +44,7 @@ namespace Lca {
             resource.bufferSource = nullptr;
             resource.fallbackBuffer = VK_NULL_HANDLE;
             resource.descriptorCount = static_cast<uint32_t>(resource.buffers.size());
-            descriptorBufferResources[descriptorSetIndex].push_back(resource);
+            descriptorResources[descriptorSetIndex].push_back(resource);
             return *this;
         }
 
@@ -52,7 +52,7 @@ namespace Lca {
             LCA_ASSERT(descriptorCount > 0, "Pipeline", "addBufferArray", "Descriptor count must be greater than zero.")
             LCA_ASSERT(fallbackBuffer != VK_NULL_HANDLE, "Pipeline", "addBufferArray", "Fallback buffer must be valid.")
 
-            DescriptorBufferResource resource{};
+            DescriptorRessource resource{};
             resource.binding = binding;
             resource.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             resource.stageFlags = stageFlags;
@@ -61,41 +61,50 @@ namespace Lca {
             resource.bufferSource = &buffers;
             resource.fallbackBuffer = fallbackBuffer;
             resource.descriptorCount = descriptorCount;
-            descriptorBufferResources[descriptorSetIndex].push_back(resource);
+            descriptorResources[descriptorSetIndex].push_back(resource);
             return *this;
         }
 
         Pipeline& Pipeline::addUniformBuffer(const uint32_t descriptorSetIndex, const uint32_t binding, VkBuffer buffer, const VkShaderStageFlags stageFlags) {
-            DescriptorBufferResource resource{};
+            DescriptorRessource resource{};
             resource.binding = binding;
             resource.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
             resource.stageFlags = stageFlags;
             resource.buffer = buffer;
             resource.descriptorCount = 1;
-            descriptorBufferResources[descriptorSetIndex].push_back(resource);
+            descriptorResources[descriptorSetIndex].push_back(resource);
             return *this;
         }
 
         Pipeline& Pipeline::addStorageBuffer(const uint32_t descriptorSetIndex, const uint32_t binding, VkBuffer buffer, const VkShaderStageFlags stageFlags) {
-            DescriptorBufferResource resource{};
+            DescriptorRessource resource{};
             resource.binding = binding;
             resource.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             resource.stageFlags = stageFlags;
             resource.buffer = buffer;
             resource.descriptorCount = 1;
-            descriptorBufferResources[descriptorSetIndex].push_back(resource);
+            descriptorResources[descriptorSetIndex].push_back(resource);
             return *this;
         }
-
-        Pipeline& Pipeline::addTextureArrayInternal(const uint32_t binding, const Texture* textures, uint32_t textureCount, const VkShaderStageFlags stageFlags) {
+        Pipeline& Pipeline::addTexture(const uint32_t descriptorSetIndex, const uint32_t binding, const Texture& texture, const VkShaderStageFlags stageFlags) {
+            DescriptorRessource resource{};
+            resource.binding = binding;
+            resource.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            resource.stageFlags = stageFlags;
+            resource.textures = &texture;
+            resource.descriptorCount = 1;
+            descriptorResources[descriptorSetIndex].push_back(resource);
+            return *this;
+        }
+        Pipeline& Pipeline::addTextureArrayInternal(const uint32_t descriptorSetIndex, const uint32_t binding, const Texture* textures, uint32_t textureCount, const VkShaderStageFlags stageFlags) {
             LCA_ASSERT(textureCount > 0, "Pipeline", "addTextureArray", "Texture array must contain at least one texture.")
-            DescriptorTextureResource resource{};
+            DescriptorRessource resource{};
             resource.binding = binding;
             resource.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             resource.stageFlags = stageFlags;
             resource.textures = textures;
             resource.descriptorCount = textureCount;
-            descriptorTextureResources.push_back(resource);
+            descriptorResources[descriptorSetIndex].push_back(resource);
             return *this;
         }
 
@@ -136,24 +145,14 @@ namespace Lca {
             resetBaseVulkanObjects();
 
             std::vector<VkDescriptorSetLayoutBinding> layoutBindings;
-            layoutBindings.reserve(descriptorBufferResources[0].size() + descriptorTextureResources.size());
+            layoutBindings.reserve(descriptorResources[0].size());
 
-            for (const auto& bufferResource : descriptorBufferResources[0]) {
+            for (const auto& resource : descriptorResources[0]) {
                 VkDescriptorSetLayoutBinding layoutBinding{};
-                layoutBinding.binding = bufferResource.binding;
-                layoutBinding.descriptorType = bufferResource.type;
-                layoutBinding.descriptorCount = bufferResource.descriptorCount;
-                layoutBinding.stageFlags = bufferResource.stageFlags;
-                layoutBinding.pImmutableSamplers = nullptr;
-                layoutBindings.push_back(layoutBinding);
-            }
-
-            for (const auto& textureResource : descriptorTextureResources) {
-                VkDescriptorSetLayoutBinding layoutBinding{};
-                layoutBinding.binding = textureResource.binding;
-                layoutBinding.descriptorType = textureResource.type;
-                layoutBinding.descriptorCount = textureResource.descriptorCount;
-                layoutBinding.stageFlags = textureResource.stageFlags;
+                layoutBinding.binding = resource.binding;
+                layoutBinding.descriptorType = resource.type;
+                layoutBinding.descriptorCount = resource.descriptorCount;
+                layoutBinding.stageFlags = resource.stageFlags;
                 layoutBinding.pImmutableSamplers = nullptr;
                 layoutBindings.push_back(layoutBinding);
             }
@@ -212,12 +211,12 @@ namespace Lca {
             std::vector<std::vector<VkDescriptorImageInfo>> imageInfoArrays;
             std::vector<VkWriteDescriptorSet> writes;
 
-            bufferInfos.reserve(descriptorBufferResources[frameIndex].size());
-            bufferInfoArrays.reserve(descriptorBufferResources[frameIndex].size());
-            imageInfoArrays.reserve(descriptorTextureResources.size());
-            writes.reserve(descriptorBufferResources[frameIndex].size() + descriptorTextureResources.size());
+            bufferInfos.reserve(descriptorResources[frameIndex].size());
+            bufferInfoArrays.reserve(descriptorResources[frameIndex].size());
+            imageInfoArrays.reserve(descriptorResources[frameIndex].size());
+            writes.reserve(descriptorResources[frameIndex].size());
 
-            for (const auto& resource : descriptorBufferResources[frameIndex]) {
+            for (const auto& resource : descriptorResources[frameIndex]) {
                 VkWriteDescriptorSet write{};
                 write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
                 write.dstSet = descriptorSets[frameIndex];
@@ -275,36 +274,26 @@ namespace Lca {
                     }
 
                     writes.push_back(write);
-                }else{
-                    LCA_LOGE("Pipeline", "updateDescriptorSetWrites", "Unsupported descriptor type in buffer resources.")
+                } else if (resource.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+                    imageInfoArrays.emplace_back(resource.descriptorCount);
+                    auto& infos = imageInfoArrays.back();
+                    LCA_ASSERT(resource.textures != nullptr, "Pipeline", "updateDescriptorSetWrites", "Texture array pointer is null.")
+
+                    for (uint32_t i = 0; i < resource.descriptorCount; ++i) {
+                        const Texture* selectedTexture = &(resource.textures[i]);
+
+                        VkDescriptorImageInfo info{};
+                        info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                        info.imageView = selectedTexture->vkImageView;
+                        info.sampler = selectedTexture->vkSampler;
+                        infos[i] = info;
+                    }
+
+                    write.pImageInfo = infos.data();
+                    writes.push_back(write);
+                } else {
+                    LCA_LOGE("Pipeline", "updateDescriptorSetWrites", "Unsupported descriptor type in resources.")
                 }
-            }  
-
-            for(auto& textureResource : descriptorTextureResources) {
-                VkWriteDescriptorSet write{};
-                write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                write.dstSet = descriptorSets[frameIndex];
-                write.dstBinding = textureResource.binding;
-                write.dstArrayElement = 0;
-                write.descriptorType = textureResource.type;
-                write.descriptorCount = textureResource.descriptorCount;
-
-                imageInfoArrays.emplace_back(textureResource.descriptorCount);
-                auto& infos = imageInfoArrays.back();
-                LCA_ASSERT(textureResource.textures != nullptr, "Pipeline", "updateDescriptorSetWrites", "Texture array pointer is null.")
-
-                for (uint32_t i = 0; i < textureResource.descriptorCount; ++i) {
-                    const Texture* selectedTexture = &(textureResource.textures[i]);
-
-                    VkDescriptorImageInfo info{};
-                    info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                    info.imageView = selectedTexture->vkImageView;
-                    info.sampler = selectedTexture->vkSampler;
-                    infos[i] = info;
-                }
-
-                write.pImageInfo = infos.data();
-                writes.push_back(write);
             }
 
             if (!writes.empty()) {

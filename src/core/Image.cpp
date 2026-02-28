@@ -694,5 +694,43 @@ namespace Lca
             texture.height = 0;
         }
 
+        Texture createDepthMap(uint32_t width, uint32_t height){
+            // Create a depth image with format from PhysicalDevice
+            Image depthImage = createImage(width, height, depthVkFormat,
+                VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                VK_SAMPLE_COUNT_1_BIT,
+                VK_IMAGE_ASPECT_DEPTH_BIT);
+
+            Texture tex{};
+            tex.width = depthImage.width;
+            tex.height = depthImage.height;
+            tex.vkImage = depthImage.vkImage;
+            tex.vmaAllocation = depthImage.vmaAllocation;
+            tex.vkImageView = depthImage.vkImageView;
+
+            VkSamplerCreateInfo samplerInfo{};
+            samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+            samplerInfo.magFilter = VK_FILTER_NEAREST;
+            samplerInfo.minFilter = VK_FILTER_NEAREST;
+            samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            samplerInfo.anisotropyEnable = VK_FALSE;
+            samplerInfo.maxAnisotropy = 1.0f;
+            samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+            samplerInfo.unnormalizedCoordinates = VK_FALSE;
+            samplerInfo.compareEnable = VK_FALSE;
+            samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
+            samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+
+            LCA_CHECK_VULKAN(
+                vkCreateSampler(vkDevice, &samplerInfo, nullptr, &tex.vkSampler),
+                "createDepthMap",
+                "vkCreateSampler"
+            )
+
+            return tex;
+        }
+
     }
 }

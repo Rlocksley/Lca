@@ -1,5 +1,6 @@
 #include "AssetManager.hpp"
 #include "Queue.hpp"
+#include "PhysicalDevice.hpp"
 
 
 
@@ -47,6 +48,7 @@ namespace Lca{
             }
 
             textureMap.clear();
+            
         }
 
         void AssetManager::shutdown(){
@@ -68,6 +70,8 @@ namespace Lca{
 
             destroyBuffer(indexBuffer);
             destroyBuffer(vertexBuffer);
+
+            
         }
 
         void AssetManager::loadTexture(const std::string& name, const std::string& filePath) {
@@ -142,6 +146,8 @@ namespace Lca{
             info.sampler = selected->vkSampler;
             return info;
         }
+
+        
 
         uint32_t AssetManager::addMaterial(const std::string& name, const Material& material){
             if (materialMap.find(name) != materialMap.end()) {

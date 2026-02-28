@@ -45,14 +45,16 @@ struct Light {
 
 // Camera / projection data
 layout(set = 0, binding = 0) uniform CameraUBO {
+    vec4 frustumPlanes[6];
     mat4 projection;       // Projection matrix
     mat4 view;             // View matrix (world → view)
+    mat4 viewProjection;
     mat4 inverseProjection;// Inverse of projection
+    vec4 camPos;
+    vec4 camDir;
     vec2 screenSize;       // Width, height in pixels
-    uint lightCount;       // Number of active point lights
     float nearClip;        // Near plane distance
     float farClip;         // Far plane distance
-    float pad0;
 } ubo;
 
 // Resolved single-sample depth texture
@@ -60,8 +62,9 @@ layout(set = 0, binding = 1) uniform sampler2D depthMap;
 
 // Point-light SSBO (world-space positions, read-only)
 layout(std430, set = 0, binding = 2) readonly buffer LightBuffer {
+    uint lightCount;
     Light lights[];
-};
+} lightData;
 
 // Per-tile visible light index list
 // Layout: for tile (tx,ty) at linear index  tid = ty * tileCountX + tx
@@ -167,6 +170,14 @@ void main() {
         float z0 = clipToViewZ(minDepthClip);
         float z1 = clipToViewZ(maxDepthClip);
 
+        // If the tile contained only the clear value (depth == 1.0),
+        // assume a conservative full-depth range so we don't incorrectly
+        // cull lights for newly-visible geometry that appears this frame.
+        if (minDepthClip == 1.0 && maxDepthClip == 1.0) {
+            z0 = clipToViewZ(0.0);
+            z1 = clipToViewZ(1.0);
+        }
+
         // In a left-handed, -Z forward view space the "near" Z is
         // the algebraically larger value (closer to 0) and "far"
         // is more negative.  Store them so min < max.
@@ -200,17 +211,17 @@ void main() {
     // 4. Parallel light culling
     // --------------------------------------------------
     uint threadCount = gl_WorkGroupSize.x * gl_WorkGroupSize.y; // 256
-    uint passCount   = (ubo.lightCount + threadCount - 1u) / threadCount;
+    uint passCount   = (lightData.lightCount + threadCount - 1u) / threadCount;
 
     for (uint pass = 0u; pass < passCount; ++pass) {
         uint lightIdx = pass * threadCount + threadIndex;
 
-        if (lightIdx >= ubo.lightCount) {
+        if (lightIdx >= lightData.lightCount) {
             continue;
         }
 
         // Fetch light and transform position to view space
-        Light light    = lights[lightIdx];
+        Light light    = lightData.lights[lightIdx];
         uint  type     = uint(light.position.w);
         vec3  worldPos = light.position.xyz;
         float radius   = light.params.x;  // radius stored in params.x

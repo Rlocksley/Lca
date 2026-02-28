@@ -24,6 +24,10 @@ namespace Lca {
 					VK_SHADER_STAGE_COMPUTE_BIT
 				);
 				addStorageBuffer(i, 6, GetRenderer().getShaderCapacityBuffer(), VK_SHADER_STAGE_COMPUTE_BIT);
+	                // Depth pre-pass buffer (single per-frame indirect buffer storing all visible draw commands)
+	                addStorageBuffer(i, 7, GetRenderer().getDepthPrePassBuffer(i), VK_SHADER_STAGE_COMPUTE_BIT);
+	                // Depth pre-pass counter (single uint)
+	                addStorageBuffer(i, 8, GetRenderer().getDepthPrePassCountBuffer(i), VK_SHADER_STAGE_COMPUTE_BIT);
 			}
 		}
 
