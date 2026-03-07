@@ -64,6 +64,7 @@ UberCullPipeline.hpp
 UberCullPipeline.cpp
 AssetManager.hpp
 AssetManager.cpp
+Helpers.hpp
 Renderer.hpp
 Renderer.cpp
 Pipeline.hpp
@@ -82,4 +83,5 @@ target_link_libraries(lca_core PUBLIC
     Vulkan::Vulkan  # The imported target for Vulkan
     glm::glm        # The imported target for GLM
     glfw            # The imported target for GLFW (note: glfw, not glfw3)
+    assimp::assimp  # The imported target for Assimp
 )

@@ -37,11 +37,9 @@ namespace Lca{
                 depthPrePassCountBuffer[i] = createBuffer(1, sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
 
                 // Create per-frame tile light index buffers for the light culling compute shader.
-                // Must match shader constants: TILE_SIZE = 16, MAX_LIGHTS_PER_TILE = 256
-                constexpr uint32_t TILE_SIZE = 16u;
-                constexpr uint32_t MAX_LIGHTS_PER_TILE = 256u;
-                const uint32_t tilesX = (vkExtent2D.width + TILE_SIZE - 1u) / TILE_SIZE;
-                const uint32_t tilesY = (vkExtent2D.height + TILE_SIZE - 1u) / TILE_SIZE;
+                // Must match shader constants
+                const uint32_t tilesX = (vkExtent2D.width + TILE_WIDTH - 1u) / TILE_WIDTH;
+                const uint32_t tilesY = (vkExtent2D.height + TILE_HEIGHT - 1u) / TILE_HEIGHT;
                 const uint32_t entriesPerTile = MAX_LIGHTS_PER_TILE + 1u; // count + indices
                 const uint32_t totalElements = tilesX * tilesY * entriesPerTile;
                 lightIndicesBuffer[i] = createBuffer(totalElements, sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
@@ -119,8 +117,30 @@ namespace Lca{
 
             beginCommand(command[frameIndex]);
 
-            objectInstancesGPU[frameIndex].recordSync(command[frameIndex]);
-            modelMatricesGPU[frameIndex].recordSync(command[frameIndex]);
+            // Copy only the actually used portion of large buffers to avoid
+            // transferring tens of megabytes of unused data every frame.
+            {
+                const uint32_t usedObjects = objectInstances.getSize();
+                if (usedObjects > 0) {
+                    VkBufferCopy region{};
+                    region.size = static_cast<VkDeviceSize>(usedObjects) * sizeof(ObjectInstance);
+                    vkCmdCopyBuffer(command[frameIndex].vkCommandBuffer,
+                                    objectInstancesGPU[frameIndex].interface.vkBuffer,
+                                    objectInstancesGPU[frameIndex].buffer.vkBuffer,
+                                    1, &region);
+                }
+            }
+            {
+                const uint32_t usedMatrices = modelMatrices.getSize();
+                if (usedMatrices > 0) {
+                    VkBufferCopy region{};
+                    region.size = static_cast<VkDeviceSize>(usedMatrices) * sizeof(ModelMatrix);
+                    vkCmdCopyBuffer(command[frameIndex].vkCommandBuffer,
+                                    modelMatricesGPU[frameIndex].interface.vkBuffer,
+                                    modelMatricesGPU[frameIndex].buffer.vkBuffer,
+                                    1, &region);
+                }
+            }
             cameraBuffer[frameIndex].recordSync(command[frameIndex]);
             lightsGPU[frameIndex].recordSync(command[frameIndex]);
             GetAssetManager().recordSync(command[frameIndex]);
@@ -129,8 +149,15 @@ namespace Lca{
             for (auto& indirectBuffer : indirectBuffers[frameIndex]) {
                 vkCmdFillBuffer(command[frameIndex].vkCommandBuffer, indirectBuffer.vkBuffer, 0, VK_WHOLE_SIZE, 0);
             }
-            // Clear depth pre-pass buffers (indirect list and its count) before Uber cull writes
-            vkCmdFillBuffer(command[frameIndex].vkCommandBuffer, depthPrePassBuffer[frameIndex].vkBuffer, 0, VK_WHOLE_SIZE, 0);
+            // Clear depth pre-pass buffers — only zero the portion that the
+            // uber cull shader can actually write to (objectInstances.getSize()
+            // commands at most) plus the count word, instead of the full
+            // MAX_OBJECTS * 20-byte buffer.
+            {
+                const VkDeviceSize usedBytes = static_cast<VkDeviceSize>(objectInstances.getSize()) * sizeof(VkDrawIndexedIndirectCommand);
+                const VkDeviceSize fillSize  = usedBytes > 0 ? usedBytes : 4;
+                vkCmdFillBuffer(command[frameIndex].vkCommandBuffer, depthPrePassBuffer[frameIndex].vkBuffer, 0, fillSize, 0);
+            }
             vkCmdFillBuffer(command[frameIndex].vkCommandBuffer, depthPrePassCountBuffer[frameIndex].vkBuffer, 0, VK_WHOLE_SIZE, 0);
             vkCmdFillBuffer(command[frameIndex].vkCommandBuffer, lightIndicesBuffer[frameIndex].vkBuffer, 0, VK_WHOLE_SIZE, 0);
 
@@ -309,6 +336,7 @@ namespace Lca{
 
                 vkCmdPipelineBarrier(
                     command[frameIndex].vkCommandBuffer,
+                    VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
                     VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                     0,
@@ -338,27 +366,31 @@ namespace Lca{
                     nullptr
                 );
 
-                constexpr uint32_t TILE_SIZE = 16u;
-                const uint32_t groupCountX = (vkExtent2D.width + TILE_SIZE - 1u) / TILE_SIZE;
-                const uint32_t groupCountY = (vkExtent2D.height + TILE_SIZE - 1u) / TILE_SIZE;
+                const uint32_t groupCountX = (vkExtent2D.width + TILE_WIDTH - 1u) / TILE_WIDTH;
+                const uint32_t groupCountY = (vkExtent2D.height + TILE_HEIGHT - 1u) / TILE_HEIGHT;
                 vkCmdDispatch(command[frameIndex].vkCommandBuffer, groupCountX, groupCountY, 1);
             }
 
-            // Make compute writes (light indices) visible to draw indirect
-            VkMemoryBarrier computeToDrawBarrier{};
-            computeToDrawBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-            computeToDrawBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            computeToDrawBarrier.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+            // Make light cull compute writes visible to fragment shader SSBO reads.
+            VkBufferMemoryBarrier lightIndicesBarrier{};
+            lightIndicesBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+            lightIndicesBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            lightIndicesBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            lightIndicesBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            lightIndicesBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            lightIndicesBarrier.buffer = lightIndicesBuffer[frameIndex].vkBuffer;
+            lightIndicesBarrier.offset = 0;
+            lightIndicesBarrier.size = VK_WHOLE_SIZE;
 
             vkCmdPipelineBarrier(
                 command[frameIndex].vkCommandBuffer,
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                 0,
-                1,
-                &computeToDrawBarrier,
                 0,
                 nullptr,
+                1,
+                &lightIndicesBarrier,
                 0,
                 nullptr
             );

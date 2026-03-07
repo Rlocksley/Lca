@@ -22,7 +22,7 @@
 // ============================================================
 
 #define TILE_SIZE 16
-#define MAX_LIGHTS_PER_TILE 256
+#define MAX_LIGHTS_PER_TILE 64
 
 layout(local_size_x = TILE_SIZE, local_size_y = TILE_SIZE, local_size_z = 1) in;
 
@@ -131,7 +131,7 @@ float distToPlane(vec4 plane, vec3 point) {
 // -----------------------------------------------------------
 void main() {
     ivec2 pixelPos    = ivec2(gl_GlobalInvocationID.xy);
-    uint  threadIndex = gl_LocalInvocationIndex; // 0..255
+    uint  threadIndex = gl_LocalInvocationIndex; // 0..255 (16x16 tile)
 
     // --------------------------------------------------
     // 1. Initialise shared memory (single thread)
@@ -170,14 +170,6 @@ void main() {
         float z0 = clipToViewZ(minDepthClip);
         float z1 = clipToViewZ(maxDepthClip);
 
-        // If the tile contained only the clear value (depth == 1.0),
-        // assume a conservative full-depth range so we don't incorrectly
-        // cull lights for newly-visible geometry that appears this frame.
-        if (minDepthClip == 1.0 && maxDepthClip == 1.0) {
-            z0 = clipToViewZ(0.0);
-            z1 = clipToViewZ(1.0);
-        }
-
         // In a left-handed, -Z forward view space the "near" Z is
         // the algebraically larger value (closer to 0) and "far"
         // is more negative.  Store them so min < max.
@@ -210,7 +202,7 @@ void main() {
     // --------------------------------------------------
     // 4. Parallel light culling
     // --------------------------------------------------
-    uint threadCount = gl_WorkGroupSize.x * gl_WorkGroupSize.y; // 256
+    uint threadCount = gl_WorkGroupSize.x * gl_WorkGroupSize.y; // 256 (16x16)
     uint passCount   = (lightData.lightCount + threadCount - 1u) / threadCount;
 
     for (uint pass = 0u; pass < passCount; ++pass) {
@@ -222,13 +214,13 @@ void main() {
 
         // Fetch light and transform position to view space
         Light light    = lightData.lights[lightIdx];
-        uint  type     = uint(light.position.w);
+        uint  type     = uint(round(light.position.w));
         vec3  worldPos = light.position.xyz;
         float radius   = light.params.x;  // radius stored in params.x
 
         bool visible = true;
 
-        // Directional lights (type 2) have infinite range — always visible
+        // Directional lights (type 2) have infinite range — always visible.
         if (type == 2u) {
             // skip all culling, always add
         } else {

@@ -11,7 +11,7 @@ namespace Lca{
         struct TransformID {
             uint32_t id;
 
-            TransformID() : id(0) {}
+            TransformID() : id(UINT32_MAX) {}
             explicit TransformID(uint32_t inID) : id(inID) {}
 
             bool operator==(const TransformID& other) const {
@@ -34,6 +34,7 @@ namespace Lca{
                 
                 world.observer<Lca::Component::Transform, Lca::Component::TransformID>()
                 .event(flecs::OnAdd)
+                .event(flecs::OnSet)
                 .each([](flecs::entity e, Lca::Component::Transform& transform, Lca::Component::TransformID& transformID) {
                     Core::ModelMatrix modelMatrix;
                     modelMatrix.model = transform.getMatrix();
@@ -45,7 +46,11 @@ namespace Lca{
                     modelMatrix.rotation.z = transform.rotation.z;
                     modelMatrix.rotation.w = transform.rotation.w;
                     
-                    transformID.id = Core::GetRenderer().addModelMatrix(modelMatrix);
+                    if (transformID.id == UINT32_MAX) {
+                        transformID.id = Core::GetRenderer().addModelMatrix(modelMatrix);
+                    } else {
+                        Core::GetRenderer().updateModelMatrix(transformID.id, modelMatrix);
+                    }
                 })
                 .add<Lca::Component::PersistentSystem>();
 

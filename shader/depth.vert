@@ -11,8 +11,8 @@ layout(set = 0, binding = 0) uniform CameraBuffer {
     mat4 view;             // View matrix (world → view)
     mat4 viewProjection;
     mat4 inverseProjection;// Inverse of projection
-    vec3 camPos;
-    vec3 camDir;
+    vec4 camPos;
+    vec4 camDir;
     vec2 screenSize;       // Width, height in pixels
     float nearClip;        // Near plane distance
     float farClip;         // Far plane distance

@@ -5,6 +5,7 @@
 #include "Image.hpp"
 #include "Vertex.hpp"
 #include "Renderer.hpp"
+
 namespace Lca{
     namespace Core{
         
@@ -14,6 +15,15 @@ namespace Lca{
             float metallic;
             float padding[2];
         };
+
+        struct MeshInstance {
+            std::string meshName;
+            std::string materialName;
+            uint32_t meshId;
+            uint32_t materialId;
+        };
+
+        using Model = std::vector<MeshInstance>;
 
 
         class AssetManager{
@@ -36,6 +46,9 @@ namespace Lca{
             uint32_t addMesh(const std::string& name, const std::vector<Vertex::Mesh>& vertices, const std::vector<uint32_t>& indices);
             void removeMesh(const std::string& name);
             uint32_t getMeshId(const std::string& name) const;
+
+            Model loadModel(const std::string& name, const std::string& filePath);
+            const Model& getModel(const std::string& name) const;
 
             const Buffer getMaterialBuffer() const { return materials.buffer; }
             const std::array<Texture, MAX_TEXTURES>& getTextures() const { return textures; }
@@ -71,6 +84,7 @@ namespace Lca{
             std::unordered_map<std::string, uint32_t> materialMap;
             std::unordered_map<std::string, uint32_t> textureMap;
             std::unordered_map<std::string, uint32_t> meshMap;
+            std::unordered_map<std::string, Model> modelMap;
 
 
             uint32_t currentVertexOffset = 0;

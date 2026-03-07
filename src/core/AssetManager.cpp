@@ -2,6 +2,12 @@
 #include "Queue.hpp"
 #include "PhysicalDevice.hpp"
 
+#include <assimp/Importer.hpp>
+#include <assimp/scene.h>
+#include <assimp/postprocess.h>
+#include <filesystem>
+
+#include "stb/stb_image.h"
 
 
 namespace Lca{
@@ -303,6 +309,173 @@ namespace Lca{
                 return it->second;
             }
             LCA_LOGE("AssetManager", "getMeshId", "Mesh with name " + name + " not found.");
+        }
+
+        Model AssetManager::loadModel(const std::string& name, const std::string& filePath) {
+            LCA_ASSERT(modelMap.find(name) == modelMap.end(), "AssetManager", "loadModel", "Model with name " + name + " already exists.");
+
+            Assimp::Importer importer;
+            const aiScene* scene = importer.ReadFile(filePath,
+                aiProcess_Triangulate |
+                aiProcess_GenNormals |
+                aiProcess_FlipUVs |
+                aiProcess_CalcTangentSpace |
+                aiProcess_JoinIdenticalVertices);
+
+            LCA_ASSERT(scene && !(scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) && scene->mRootNode,
+                "AssetManager", "loadModel", "Failed to load model: " + std::string(importer.GetErrorString()));
+
+            std::filesystem::path modelPath(filePath);
+            std::string directory = modelPath.parent_path().string();
+
+            Model model;
+
+            // --- Pre-process materials (once per unique aiMaterial) ---
+            // Maps assimp material index -> our material id / name
+            std::unordered_map<uint32_t, uint32_t> processedMaterials;
+            std::unordered_map<uint32_t, std::string> processedMaterialNames;
+
+            for (uint32_t matIdx = 0; matIdx < scene->mNumMaterials; ++matIdx) {
+                const aiMaterial* aiMat = scene->mMaterials[matIdx];
+                aiString aiMatName;
+                std::string materialName = (aiMat->Get(AI_MATKEY_NAME, aiMatName) == AI_SUCCESS && aiMatName.length > 0)
+                    ? std::string(aiMatName.C_Str())
+                    : name + "_material_" + std::to_string(matIdx);
+
+                Material material{};
+                material.textureId = -1;
+                material.roughness = 0.5f;
+                material.metallic = 0.0f;
+
+                // Try to load diffuse texture
+                if (aiMat->GetTextureCount(aiTextureType_DIFFUSE) > 0) {
+                    aiString texPath;
+                    if (aiMat->GetTexture(aiTextureType_DIFFUSE, 0, &texPath) == AI_SUCCESS) {
+                        std::string textureName = name + "_tex_" + std::to_string(matIdx);
+
+                        // Only load the texture if it hasn't been loaded yet
+                        if (textureMap.find(textureName) == textureMap.end()) {
+                            const aiTexture* embeddedTex = scene->GetEmbeddedTexture(texPath.C_Str());
+                            if (embeddedTex) {
+                                if (embeddedTex->mHeight == 0) {
+                                    int width, height, nrChannels;
+                                    auto* pixels = stbi_load_from_memory(
+                                        reinterpret_cast<unsigned char*>(embeddedTex->pcData),
+                                        embeddedTex->mWidth, &width, &height, &nrChannels, 4);
+                                    Texture tex = createTexture(width, height, pixels);
+                                    stbi_image_free(pixels);
+                                    addTexture(textureName, tex);
+                                } else {
+                                    // Raw ARGB8888 data
+                                    int width, height, nrChannels;
+                                    auto* pixels = stbi_load_from_memory(
+                                    reinterpret_cast<unsigned char*>(embeddedTex->pcData),
+                                    embeddedTex->mWidth * embeddedTex->mHeight * 4, &width, &height, &nrChannels, 4);
+                                    Texture tex = createTexture(width, height, pixels);
+                                    stbi_image_free(pixels);
+                                    addTexture(textureName, tex);
+                                }
+                            } else {
+                                // External texture file
+                                std::string fullPath = directory + "/" + texPath.C_Str();
+                                loadTexture(textureName, fullPath);
+                            }
+                        }
+
+                        material.textureId = static_cast<int32_t>(getTextureId(textureName));
+                    }
+                }
+
+                // Extract roughness/metallic if available
+                float roughness = 0.5f;
+                float metallic = 0.0f;
+                if (aiMat->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness) == AI_SUCCESS) {
+                    material.roughness = roughness;
+                }
+                if (aiMat->Get(AI_MATKEY_METALLIC_FACTOR, metallic) == AI_SUCCESS) {
+                    material.metallic = metallic;
+                }
+
+                uint32_t materialId = addMaterial(materialName, material);
+                processedMaterials[matIdx] = materialId;
+                processedMaterialNames[matIdx] = materialName;
+            }
+
+            // --- Process each mesh in the scene ---
+            for (uint32_t m = 0; m < scene->mNumMeshes; ++m) {
+                const aiMesh* aiMeshPtr = scene->mMeshes[m];
+                std::string meshName = aiMeshPtr->mName.length > 0
+                    ? std::string(aiMeshPtr->mName.C_Str())
+                    : name + "_mesh_" + std::to_string(m);
+
+                // --- Extract vertices ---
+                std::vector<Vertex::Mesh> vertices;
+                vertices.reserve(aiMeshPtr->mNumVertices);
+
+                for (uint32_t v = 0; v < aiMeshPtr->mNumVertices; ++v) {
+                    Vertex::Mesh vertex{};
+                    vertex.position = glm::vec3(
+                        aiMeshPtr->mVertices[v].x,
+                        aiMeshPtr->mVertices[v].y,
+                        aiMeshPtr->mVertices[v].z
+                    );
+
+                    if (aiMeshPtr->HasNormals()) {
+                        vertex.normal = glm::vec3(
+                            aiMeshPtr->mNormals[v].x,
+                            aiMeshPtr->mNormals[v].y,
+                            aiMeshPtr->mNormals[v].z
+                        );
+                    }
+
+                    if (aiMeshPtr->HasVertexColors(0)) {
+                        vertex.color = glm::vec4(
+                            aiMeshPtr->mColors[0][v].r,
+                            aiMeshPtr->mColors[0][v].g,
+                            aiMeshPtr->mColors[0][v].b,
+                            aiMeshPtr->mColors[0][v].a
+                        );
+                    } else {
+                        vertex.color = glm::vec4(1.0f);
+                    }
+
+                    if (aiMeshPtr->HasTextureCoords(0)) {
+                        vertex.texCoord = glm::vec2(
+                            aiMeshPtr->mTextureCoords[0][v].x,
+                            aiMeshPtr->mTextureCoords[0][v].y
+                        );
+                    }
+
+                    vertices.push_back(vertex);
+                }
+
+                // --- Extract indices ---
+                std::vector<uint32_t> indices;
+                for (uint32_t f = 0; f < aiMeshPtr->mNumFaces; ++f) {
+                    const aiFace& face = aiMeshPtr->mFaces[f];
+                    indices.push_back(face.mIndices[0]);
+                    indices.push_back(face.mIndices[2]);
+                    indices.push_back(face.mIndices[1]);
+                }
+
+                uint32_t meshId = addMesh(meshName, vertices, indices);
+
+                // Look up the material id from the pre-processed map
+                uint32_t materialId = processedMaterials[aiMeshPtr->mMaterialIndex];
+                std::string matName = processedMaterialNames[aiMeshPtr->mMaterialIndex];
+
+                model.push_back({ meshName, matName, meshId, materialId });
+            }
+
+            modelMap[name] = model;
+            LCA_LOGI("AssetManager", "loadModel", "Loaded model '" + name + "' with " + std::to_string(model.size()) + " mesh(es) from " + filePath);
+            return model;
+        }
+
+        const Model& AssetManager::getModel(const std::string& name) const {
+            auto it = modelMap.find(name);
+            LCA_ASSERT(it != modelMap.end(), "AssetManager", "getModel", "Model with name " + name + " not found.");
+            return it->second;
         }
     }
 }

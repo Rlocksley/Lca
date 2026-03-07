@@ -58,7 +58,7 @@ find_package(flecs REQUIRED)
 
 #find_package(Jolt REQUIRED)
 
-#find_package(assimp REQUIRED)
+find_package(assimp REQUIRED)
 
 # --- Build Internal Libraries ---
 # Process the subdirectories to create our 'component_lib' and 'core_lib' targets.
@@ -74,8 +74,8 @@ add_subdirectory(./src/application)
 add_subdirectory(./examples/example1)
 add_subdirectory(./examples/example2)
 add_subdirectory(./examples/example3)
-#add_subdirectory(./examples/example4)
-#add_subdirectory(./examples/example5)
+add_subdirectory(./examples/example4)
+add_subdirectory(./examples/example5)
 #add_subdirectory(./examples/example6)
 #add_subdirectory(./examples/example7)
 #add_subdirectory(./examples/example8)

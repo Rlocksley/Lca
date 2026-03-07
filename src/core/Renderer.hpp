@@ -22,6 +22,9 @@ namespace Lca {
         const inline uint32_t MAX_SHADERS = 1024;
         const inline uint32_t MAX_TEXTURES = 1024;
         const inline uint32_t MAX_LIGHTS = 1024;
+        const inline uint32_t TILE_WIDTH = 16;
+        const inline uint32_t TILE_HEIGHT = 16;
+        const inline uint32_t MAX_LIGHTS_PER_TILE = 64;
 
         struct Camera{
             glm::vec4 frustumPlanes[6];
