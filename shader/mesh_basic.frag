@@ -155,7 +155,7 @@ void main() {
 
     // Accumulate lighting from culled lights using the per-tile light index list
     const uint TILE_SIZE = 16u;
-    const uint MAX_LIGHTS_PER_TILE = 64u;
+    const uint MAX_LIGHTS_PER_TILE = 256u;
 
     // Compute tile coordinates from fragment position
     uint px = uint(gl_FragCoord.x);

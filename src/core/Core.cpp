@@ -72,6 +72,16 @@ namespace Core
 
     bool updateCore()
     {
+        static int frameCounter = 1;
+        int framerate = static_cast<int>(1.f / Time::deltaTime);
+        if(frameCounter++%1000 == 0 || framerate < 100){
+            std::cout << "Framerate: " << framerate << " FPS" << std::endl;
+        };
+
+        // Wait for the GPU to finish with this frame index's resources before
+        // the main thread overwrites its staging buffers during world.progress().
+        // This is what provides real double-buffer pipelining: the fence for
+        // frame N blocks here while the GPU executes frame N^1 (the other index).
         Lca::Core::waitForCommand(Lca::Core::command[currentFrameIndex]);
 
         glfwPollEvents();

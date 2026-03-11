@@ -74,9 +74,45 @@ public:
     }
 };
 
+// ---------------------------------------------------------------------------
+// StreamingLevel — a world chunk that can be streamed in/out without a
+// loading screen.  Heavy work (file I/O, decompression) goes in loadAssets()
+// which runs on a background thread.  setupScene() / cleanupScene() run on
+// the main thread and should be lightweight (entity creation / deletion).
+// ---------------------------------------------------------------------------
+class StreamingLevel {
+public:
+    virtual ~StreamingLevel() = default;
+
+    // Unique identifier for this chunk / region (e.g. "zone_A3").
+    virtual std::string getId() const = 0;
+
+    // 1. Called on background thread.  Load textures, meshes, materials, etc.
+    //    Put ALL heavy work here — file I/O, decompression, parsing.
+    virtual void loadAssets() {}
+
+    // 2. Called on main thread once loadAssets() completes.
+    //    Create entities, set up scene state.  Keep this lightweight.
+    virtual void setupScene(flecs::world& world) {}
+
+    // 3. Called on main thread when this chunk is streamed out.
+    //    Destroy entities owned by this streaming level.
+    virtual void cleanupScene(flecs::world& world) {}
+};
+
 // Component to request a level load from within a Flecs system
 struct LoadLevelRequest {
     std::shared_ptr<Level> nextLevel;
+};
+
+// Component to request streaming level loads from within a Flecs system.
+// Set on the world singleton; processed and removed each frame.
+struct StreamInRequest {
+    std::vector<std::shared_ptr<StreamingLevel>> levels;
+};
+
+struct StreamOutRequest {
+    std::vector<std::string> levelIds;
 };
 
 } // namespace Lca

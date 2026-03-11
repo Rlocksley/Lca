@@ -88,6 +88,7 @@ namespace Lca{
         }
 
         void AssetManager::addTexture(const std::string& name, const Texture& texture){
+            std::lock_guard<std::mutex> lock(assetMutex);
             auto existing = textureMap.find(name);
             if (existing != textureMap.end()) {
                 uint32_t id = existing->second;
@@ -114,6 +115,7 @@ namespace Lca{
         }
 
         void AssetManager::removeTexture(const std::string& name){
+            std::lock_guard<std::mutex> lock(assetMutex);
             auto it = textureMap.find(name);
             if (it == textureMap.end()) {
                 LCA_LOGE("AssetManager", "removeTexture", "Texture with name " + name + " not found.");
@@ -132,6 +134,7 @@ namespace Lca{
         }
 
         uint32_t AssetManager::getTextureId(const std::string& name) const {
+            std::lock_guard<std::mutex> lock(assetMutex);
             auto it = textureMap.find(name);
             if (it != textureMap.end()) {
                 return it->second;
@@ -156,6 +159,7 @@ namespace Lca{
         
 
         uint32_t AssetManager::addMaterial(const std::string& name, const Material& material){
+            std::lock_guard<std::mutex> lock(assetMutex);
             if (materialMap.find(name) != materialMap.end()) {
                 uint32_t id = materialMap[name];
                 VkDeviceSize offset = id * materials.interface.elementSize;
@@ -169,6 +173,7 @@ namespace Lca{
         }
 
         void AssetManager::removeMaterial(const std::string& name){
+            std::lock_guard<std::mutex> lock(assetMutex);
             if (materialMap.find(name) != materialMap.end()) {
                 uint32_t id = materialMap[name];
                 materials.remove(id);
@@ -179,6 +184,7 @@ namespace Lca{
         }
 
         uint32_t AssetManager::getMaterialId(const std::string& name) const {
+            std::lock_guard<std::mutex> lock(assetMutex);
             auto it = materialMap.find(name);
             if (it != materialMap.end()) {
                 return it->second;
@@ -216,15 +222,19 @@ namespace Lca{
         }
 
         uint32_t AssetManager::addMesh(const std::string& name, const std::vector<Vertex::Mesh>& vertices, const std::vector<uint32_t>& indices){
-            LCA_ASSERT(meshMap.find(name) == meshMap.end(), "AssetManager", "addMesh",  "Mesh with name " + name + " already exists.");
             LCA_ASSERT(vertices.size() > 0, "AssetManager", "addMesh",  "Vertex list is empty for mesh " + name + ".");
             LCA_ASSERT(indices.size() > 0, "AssetManager", "addMesh",  "Index list is empty for mesh " + name + ".");
 
             uint32_t vertexCount = static_cast<uint32_t>(vertices.size());
             uint32_t indexCount = static_cast<uint32_t>(indices.size());
 
-            uint32_t vertexOffsetVal = allocateRange(freeVertexRanges, currentVertexOffset, vertexCount);
-            uint32_t indexOffsetVal = allocateRange(freeIndexRanges, currentIndexOffset, indexCount);
+            uint32_t vertexOffsetVal, indexOffsetVal;
+            {
+                std::lock_guard<std::mutex> lock(assetMutex);
+                LCA_ASSERT(meshMap.find(name) == meshMap.end(), "AssetManager", "addMesh",  "Mesh with name " + name + " already exists.");
+                vertexOffsetVal = allocateRange(freeVertexRanges, currentVertexOffset, vertexCount);
+                indexOffsetVal = allocateRange(freeIndexRanges, currentIndexOffset, indexCount);
+            }
 
             VkDeviceSize vertexByteSize = vertexCount * sizeof(Vertex::Mesh);
             BufferInterface stagingVertex = createBufferInterface(vertexCount, sizeof(Vertex::Mesh), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
@@ -280,13 +290,16 @@ namespace Lca{
             info.boundingSphere = glm::vec4(center, radius);
         
             uint32_t id = meshInfos.add(&info);
-            // Internal tracking
-            meshMap[name] = id;
+            {
+                std::lock_guard<std::mutex> lock(assetMutex);
+                meshMap[name] = id;
+            }
 
             return id;
         }
 
         void AssetManager::removeMesh(const std::string& name){
+            std::lock_guard<std::mutex> lock(assetMutex);
             auto it = meshMap.find(name);
             if (it != meshMap.end()) {
                 uint32_t id = it->second;
@@ -304,6 +317,7 @@ namespace Lca{
         }
 
         uint32_t AssetManager::getMeshId(const std::string& name) const {
+            std::lock_guard<std::mutex> lock(assetMutex);
             auto it = meshMap.find(name);
             if (it != meshMap.end()) {
                 return it->second;

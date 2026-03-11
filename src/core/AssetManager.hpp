@@ -5,6 +5,7 @@
 #include "Image.hpp"
 #include "Vertex.hpp"
 #include "Renderer.hpp"
+#include <mutex>
 
 namespace Lca{
     namespace Core{
@@ -95,6 +96,8 @@ namespace Lca{
             
             uint32_t allocateRange(std::vector<BufferRange>& freeList, uint32_t& currentTop, uint32_t size);
             void freeRange(std::vector<BufferRange>& freeList, uint32_t offset, uint32_t size);
+
+            mutable std::mutex assetMutex;  // guards meshMap, materialMap, free-lists, offsets, and command submission
         };
 
         AssetManager& GetAssetManager();

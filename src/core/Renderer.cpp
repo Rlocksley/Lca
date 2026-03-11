@@ -117,30 +117,16 @@ namespace Lca{
 
             beginCommand(command[frameIndex]);
 
-            // Copy only the actually used portion of large buffers to avoid
-            // transferring tens of megabytes of unused data every frame.
-            {
-                const uint32_t usedObjects = objectInstances.getSize();
-                if (usedObjects > 0) {
-                    VkBufferCopy region{};
-                    region.size = static_cast<VkDeviceSize>(usedObjects) * sizeof(ObjectInstance);
-                    vkCmdCopyBuffer(command[frameIndex].vkCommandBuffer,
-                                    objectInstancesGPU[frameIndex].interface.vkBuffer,
-                                    objectInstancesGPU[frameIndex].buffer.vkBuffer,
-                                    1, &region);
-                }
-            }
-            {
-                const uint32_t usedMatrices = modelMatrices.getSize();
-                if (usedMatrices > 0) {
-                    VkBufferCopy region{};
-                    region.size = static_cast<VkDeviceSize>(usedMatrices) * sizeof(ModelMatrix);
-                    vkCmdCopyBuffer(command[frameIndex].vkCommandBuffer,
-                                    modelMatricesGPU[frameIndex].interface.vkBuffer,
-                                    modelMatricesGPU[frameIndex].buffer.vkBuffer,
-                                    1, &region);
-                }
-            }
+            // --- Dynamic block: upload only the slots that changed this frame.
+            // copyModelMatricesToGPU / copyObjectInstancesToGPU (called by ECS
+            // systems before recordFrame) already wrote only dirty elements to
+            // the staging buffers and returned their indices.  Static entities
+            // (Component::Static) stop producing dirty indices after their
+            // first MAX_FRAMES_IN_FLIGHT frames, so they never incur a GPU
+            // copy again.  Dynamic entities are re-marked dirty every frame by
+            // the "Non Static Transform Update" system and always appear here.
+            objectInstancesGPU[frameIndex].recordSyncRanges(command[frameIndex], dirtyObjectInstanceIndices[frameIndex]);
+            modelMatricesGPU[frameIndex].recordSyncRanges(command[frameIndex], dirtyModelMatrixIndices[frameIndex]);
             cameraBuffer[frameIndex].recordSync(command[frameIndex]);
             lightsGPU[frameIndex].recordSync(command[frameIndex]);
             GetAssetManager().recordSync(command[frameIndex]);

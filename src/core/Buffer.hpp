@@ -55,6 +55,27 @@ namespace Lca
                     &copyRegion
                 );
              }
+
+            // Only upload the slots that were dirtied this frame — skips static
+            // data whose dirtyCopiesRemaining already reached zero.
+            void recordSyncRanges(const Command& command, const std::vector<uint32_t>& dirtyIndices){
+                if(dirtyIndices.empty()) return;
+                std::vector<VkBufferCopy> regions;
+                regions.reserve(dirtyIndices.size());
+                for(const uint32_t idx : dirtyIndices){
+                    VkBufferCopy r{};
+                    r.srcOffset = r.dstOffset = static_cast<VkDeviceSize>(idx) * interface.elementSize;
+                    r.size = interface.elementSize;
+                    regions.push_back(r);
+                }
+                vkCmdCopyBuffer(
+                    command.vkCommandBuffer,
+                    interface.vkBuffer,
+                    buffer.vkBuffer,
+                    static_cast<uint32_t>(regions.size()),
+                    regions.data()
+                );
+            }
         };
 
         struct SlotBufferGPU{
@@ -150,13 +171,22 @@ namespace Lca
                 markDirty(index);
             }
 
-            inline void copyTo(const BufferInterface& interface){
+            // Copies dirty slots to the staging interface and returns the
+            // indices that were written so the caller can issue targeted GPU
+            // uploads via DualBuffer::recordSyncRanges instead of a full-range
+            // vkCmdCopyBuffer.  Static entities become clean after
+            // MAX_FRAMES_IN_FLIGHT calls and their indices are no longer
+            // returned, eliminating all redundant GPU uploads for them.
+            inline std::vector<uint32_t> copyTo(const BufferInterface& interface){
                 if(dirtyIndices.empty()){
-                    return;
+                    return {};
                 }
 
                 LCA_ASSERT(sizeof(T) <= interface.elementSize, "SlotBuffer", "copy", "Element size exceeds interface element size.")
                 LCA_ASSERT(interface.numberElements >= buffer.size(), "SlotBuffer", "copy", "Interface capacity is smaller than SlotBuffer capacity.")
+
+                std::vector<uint32_t> processedIndices;
+                processedIndices.reserve(dirtyIndices.size());
 
                 std::vector<uint32_t> remainingDirtyIndices;
                 remainingDirtyIndices.reserve(dirtyIndices.size());
@@ -170,6 +200,8 @@ namespace Lca
                         sizeof(T)
                     );
 
+                    processedIndices.push_back(index);
+
                     if(dirtyCopiesRemaining[index] > 0){
                         dirtyCopiesRemaining[index]--;
                     }
@@ -182,6 +214,7 @@ namespace Lca
                 }
 
                 dirtyIndices.swap(remainingDirtyIndices);
+                return processedIndices;
             }
                 
         };

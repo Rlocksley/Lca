@@ -212,7 +212,7 @@ namespace HardcodedMeshes {
 
 
 // ──────────────────────────────────────────────────────────────
-// Game Level – 1000 houses, 1000 cars, 1000 street lanterns
+// Game Level – 100 houses, 100 cars, 100 street lanterns
 // ──────────────────────────────────────────────────────────────
 
 class GameLevel : public Lca::Level {

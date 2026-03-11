@@ -43,8 +43,8 @@ public:
         sponza.set(Component::Transform{glm::vec3(0.0f), 0.0f, glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(0.01f)});
         sponza.add<Component::Static>();
 
-        // Create 1000 random point lights
-        for (uint32_t i = 0; i < 100; i++) {
+        // Create 100 random point lights
+        for (uint32_t i = 0; i < 500; i++) {
             auto light = world.entity(("pointlight_" + std::to_string(i)).c_str());
             light.set(Component::Transform{
                 20.f * glm::vec3(random(-1.0f, 1.0f), random(-1.0f, 1.0f), random(-1.0f, 1.0f)),
@@ -56,14 +56,14 @@ public:
             light.set(Component::PointLight{
                 .color     = glm::vec3(mod3 == 0 ? 1.0f : 0.0f, mod3 == 1 ? 1.0f : 0.0f, mod3 == 2 ? 1.0f : 0.0f),
                 .intensity = random(800.0f, 800.0f),
-                .radius    = random(5.0f, 5.0f)
+                .radius    = random(11.0f, 11.0f)
             });
             light.set(LightVelocity{
                 20.f*glm::vec3(random(-1.0f, 1.0f), random(-1.0f, 1.0f), random(-1.0f, 1.0f))
             });
         }
 
-        // System: move point lights randomly, bounce off the [-100,100]³ bounds
+        // System: move point lights randomly, bounce off bounds
         world.system<Component::Transform, LightVelocity>("Light Movement")
             .with<Component::PointLight>()
             .each([](flecs::entity e, Component::Transform& t, LightVelocity& vel) {

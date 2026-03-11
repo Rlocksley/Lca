@@ -11,8 +11,8 @@ protected:
 
         //Basic setup for Loading Screen and Game Level. Rest of Asset in GameLevel for only GameLevel.
         Core::GraphicsPipelineConfig pipelineConfig{};   
-        pipelineConfig.vertexShader = "shader/mesh_basic.vert.spv";
-        pipelineConfig.fragmentShader = "shader/mesh_basic.frag.spv";
+        pipelineConfig.vertexShader = "shader/mesh_pbr.vert.spv";
+        pipelineConfig.fragmentShader = "shader/mesh_pbr.frag.spv";
 
         Core::MeshPipeline meshPipeline(pipelineConfig);
         Core::GetRenderer().addMeshPipeline("basic", std::move(meshPipeline), 250000);

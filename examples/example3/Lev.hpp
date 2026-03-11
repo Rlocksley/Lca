@@ -69,9 +69,9 @@ public:
                 
                 auto& playerTransform = it.world().entity("Player").get<Component::Transform>();
                 while(it.next()) {
+                    const auto& t = it.field<Component::Transform>(1);
                     for (auto i : it) {
                         auto e = it.entity(i);
-                        const auto& t = it.field<Component::Transform>(1);
                         if (glm::length(t[i].position - playerTransform.position) < STREAMING_DISTANCE) {
                             e.add<IsVisible>();
                             // Create an unnamed child entity, attach to parent, and store it on the parent
@@ -141,7 +141,7 @@ public:
         }
 
         // Create 1000 random point lights
-        for (uint32_t i = 0; i < 1000; i++) {
+        for (uint32_t i = 0; i < 600; i++) {
             auto light = world.entity(("pointlight_" + std::to_string(i)).c_str());
             light.set(Component::Transform{
                 glm::vec3(random(-100.0f, 100.0f), random(-100.0f, 100.0f), random(-100.0f, 100.0f)),
@@ -153,7 +153,7 @@ public:
             light.set(Component::PointLight{
                 .color     = glm::vec3(mod3 == 0 ? 1.0f : 0.0f, mod3 == 1 ? 1.0f : 0.0f, mod3 == 2 ? 1.0f : 0.0f),
                 .intensity = random(80.0f, 80.0f),
-                .radius    = random(200.0f, 200.0f)
+                .radius    = random(20.0f, 20.0f)
             });
             light.set(LightVelocity{
                 glm::vec3(random(-200.0f, 200.0f), random(-200.0f, 200.0f), random(-200.0f, 200.0f))

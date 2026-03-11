@@ -24,7 +24,7 @@ namespace Lca {
         const inline uint32_t MAX_LIGHTS = 1024;
         const inline uint32_t TILE_WIDTH = 16;
         const inline uint32_t TILE_HEIGHT = 16;
-        const inline uint32_t MAX_LIGHTS_PER_TILE = 64;
+        const inline uint32_t MAX_LIGHTS_PER_TILE = 256;
 
         struct Camera{
             glm::vec4 frustumPlanes[6];
@@ -79,13 +79,15 @@ namespace Lca {
             }   
             void removeModelMatrix(uint32_t id);
             void copyModelMatricesToGPU(uint32_t frameIndex){
-                modelMatrices.copyTo(modelMatricesGPU[frameIndex].interface);
+                // Returns only the slots that changed; static entities become
+                // clean after MAX_FRAMES_IN_FLIGHT uploads and produce no ranges.
+                dirtyModelMatrixIndices[frameIndex] = modelMatrices.copyTo(modelMatricesGPU[frameIndex].interface);
             }
             uint32_t addObjectInstance(const ObjectInstance& instance);
             void updateObjectInstance(uint32_t id, const ObjectInstance& instance);
             void removeObjectInstance(uint32_t id);
             void copyObjectInstancesToGPU(uint32_t frameIndex){
-                objectInstances.copyTo(objectInstancesGPU[frameIndex].interface);
+                dirtyObjectInstanceIndices[frameIndex] = objectInstances.copyTo(objectInstancesGPU[frameIndex].interface);
             }
             uint32_t addMeshPipeline(const std::string& name, MeshPipeline&& pipeline, uint32_t maxObjects = MAX_OBJECTS);
             uint32_t getMeshPipelineId(const std::string& name) const;
@@ -125,9 +127,14 @@ namespace Lca {
             
             SlotBuffer<ObjectInstance, MAX_OBJECTS> objectInstances;
             std::array<DualBuffer, MAX_FRAMES_IN_FLIGHT> objectInstancesGPU;
-            
+            // Dirty slot indices written to the staging buffer this frame.
+            // Static entities (Component::Static) stop appearing here after
+            // their initial MAX_FRAMES_IN_FLIGHT uploads.
+            std::array<std::vector<uint32_t>, MAX_FRAMES_IN_FLIGHT> dirtyObjectInstanceIndices;
+
             SlotBuffer<ModelMatrix, MAX_MODEL_MATRICES> modelMatrices;
             std::array<DualBuffer, MAX_FRAMES_IN_FLIGHT> modelMatricesGPU;
+            std::array<std::vector<uint32_t>, MAX_FRAMES_IN_FLIGHT> dirtyModelMatrixIndices;
             
             // Lights use a packed (dense) array, not SlotBuffer.
             // light_cull.comp iterates lightCount entries assuming no holes.
