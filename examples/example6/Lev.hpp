@@ -17,11 +17,53 @@
 #include <cmath>
 #include <cstdint>
 #include <sstream>
+#include <algorithm>
 
 using namespace Lca;
 
 // ──────────────────────────────────────────────────────────────
-// Reusable low-poly mesh helpers (same as example5)
+// Deterministic PRNG (xorshift32) — seeded per-zone so every
+// zone generates reproducible, unique content.
+// ──────────────────────────────────────────────────────────────
+
+struct ZoneRng {
+    uint32_t state;
+    explicit ZoneRng(uint32_t seed) : state(seed ? seed : 1u) {}
+
+    uint32_t next() {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        return state;
+    }
+
+    float nextFloat() {
+        return (next() & 0x7FFFFFFF) / static_cast<float>(0x7FFFFFFF);
+    }
+
+    float nextFloat(float lo, float hi) {
+        return lo + nextFloat() * (hi - lo);
+    }
+
+    int nextInt(int lo, int hi) {
+        if (lo >= hi) return lo;
+        return lo + static_cast<int>(next() % static_cast<uint32_t>(hi - lo + 1));
+    }
+
+    bool nextBool(float p = 0.5f) { return nextFloat() < p; }
+
+    glm::vec4 varyColor(glm::vec4 base, float amount = 0.12f) {
+        return glm::vec4(
+            glm::clamp(base.r + nextFloat(-amount, amount), 0.0f, 1.0f),
+            glm::clamp(base.g + nextFloat(-amount, amount), 0.0f, 1.0f),
+            glm::clamp(base.b + nextFloat(-amount, amount), 0.0f, 1.0f),
+            1.0f);
+    }
+};
+
+
+// ──────────────────────────────────────────────────────────────
+// Reusable low-poly mesh helpers
 // ──────────────────────────────────────────────────────────────
 namespace HardcodedMeshes6 {
 
@@ -61,45 +103,164 @@ namespace HardcodedMeshes6 {
         }
     };
 
-    inline void getHouseMesh(std::vector<V>& verts, std::vector<uint32_t>& idx, glm::vec4 wallCol) {
+
+    // ── Parameterised building generator ──────────────────────
+
+    struct BuildingParams {
+        float width      = 2.5f;   // half-extent X
+        float height     = 4.0f;   // wall height
+        float depth      = 2.5f;   // half-extent Z
+        float roofHeight = 2.0f;   // 0 → flat roof
+        int   windowRows = 0;
+        int   windowCols = 0;
+        bool  hasAntenna = false;
+        glm::vec4 wallCol   = glm::vec4(0.8f, 0.8f, 0.7f, 1.0f);
+        glm::vec4 roofCol   = glm::vec4(0.5f, 0.25f, 0.1f, 1.0f);
+        glm::vec4 doorCol   = glm::vec4(0.3f, 0.15f, 0.05f, 1.0f);
+        glm::vec4 windowCol = glm::vec4(0.55f, 0.78f, 1.0f, 0.9f);
+    };
+
+    inline void getBuildingMesh(std::vector<V>& verts, std::vector<uint32_t>& idx,
+                                const BuildingParams& p) {
         verts.clear(); idx.clear();
         MeshBuilder mb{verts, idx};
 
-        float wx = 2.5f, wy = 4.0f, wz = 2.5f;
-        glm::vec4 roofCol(0.5f, 0.25f, 0.1f, 1.0f);
-        glm::vec4 doorCol(0.3f, 0.15f, 0.05f, 1.0f);
+        float wx = p.width, wy = p.height, wz = p.depth;
 
-        mb.addBox({-wx, 0, -wz}, {wx, wy, wz}, wallCol);
+        // Walls
+        mb.addBox({-wx, 0, -wz}, {wx, wy, wz}, p.wallCol);
 
-        float dw = 0.6f, dh = 2.0f, dz = wz + 0.01f;
-        mb.addQuad({dw, 0, dz}, {-dw, 0, dz}, {-dw, dh, dz}, {dw, dh, dz}, doorCol);
+        // Door on +Z face
+        float dw = std::min(0.6f, wx * 0.4f);
+        float dh = std::min(2.0f, wy * 0.45f);
+        float dz = wz + 0.01f;
+        mb.addQuad({dw, 0, dz}, {-dw, 0, dz}, {-dw, dh, dz}, {dw, dh, dz}, p.doorCol);
 
-        float rh = 2.0f, overhang = 0.3f;
-        float rx = wx + overhang, rz = wz + overhang;
-        mb.addQuad({-rx, wy, -rz}, {rx, wy, -rz}, {rx, wy + rh, 0}, {-rx, wy + rh, 0}, roofCol);
-        mb.addQuad({rx, wy, rz}, {-rx, wy, rz}, {-rx, wy + rh, 0}, {rx, wy + rh, 0}, roofCol);
-        mb.addTri({rx, wy, -rz}, {rx, wy, rz}, {rx, wy + rh, 0}, roofCol);
-        mb.addTri({-rx, wy, rz}, {-rx, wy, -rz}, {-rx, wy + rh, 0}, roofCol);
+        // ── Windows on all four faces ──
+        if (p.windowRows > 0 && p.windowCols > 0) {
+            float winW = std::min(0.45f, wx * 0.55f / p.windowCols);
+            float winH = std::min(0.65f, (wy - dh) * 0.65f / std::max(1, p.windowRows));
+            float startY = dh + 0.5f;
+            float spacingY = (wy - startY) / (p.windowRows + 0.5f);
+
+            // +Z / -Z faces
+            {
+                float spacingX = (wx * 2.0f) / (p.windowCols + 1);
+                for (int face = 0; face < 2; ++face) {
+                    float fz = (face == 0) ? (wz + 0.02f) : (-wz - 0.02f);
+                    for (int r = 0; r < p.windowRows; ++r) {
+                        float cy = startY + spacingY * (r + 0.5f);
+                        for (int c = 0; c < p.windowCols; ++c) {
+                            float cx = -wx + spacingX * (c + 1);
+                            if (face == 0) {
+                                mb.addQuad({cx + winW, cy - winH, fz}, {cx - winW, cy - winH, fz},
+                                           {cx - winW, cy + winH, fz}, {cx + winW, cy + winH, fz}, p.windowCol);
+                            } else {
+                                mb.addQuad({cx - winW, cy - winH, fz}, {cx + winW, cy - winH, fz},
+                                           {cx + winW, cy + winH, fz}, {cx - winW, cy + winH, fz}, p.windowCol);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // +X / -X faces
+            {
+                int sideCols = std::max(1, p.windowCols - 1);
+                float spacingZ = (wz * 2.0f) / (sideCols + 1);
+                for (int face = 0; face < 2; ++face) {
+                    float fx = (face == 0) ? (wx + 0.02f) : (-wx - 0.02f);
+                    for (int r = 0; r < p.windowRows; ++r) {
+                        float cy = startY + spacingY * (r + 0.5f);
+                        for (int c = 0; c < sideCols; ++c) {
+                            float cz = -wz + spacingZ * (c + 1);
+                            if (face == 0) {
+                                mb.addQuad({fx, cy - winH, cz - winW}, {fx, cy - winH, cz + winW},
+                                           {fx, cy + winH, cz + winW}, {fx, cy + winH, cz - winW}, p.windowCol);
+                            } else {
+                                mb.addQuad({fx, cy - winH, cz + winW}, {fx, cy - winH, cz - winW},
+                                           {fx, cy + winH, cz - winW}, {fx, cy + winH, cz + winW}, p.windowCol);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Roof ──
+        if (p.roofHeight > 0.01f) {
+            // Peaked roof
+            float rh = p.roofHeight, overhang = 0.3f;
+            float rx = wx + overhang, rz = wz + overhang;
+            mb.addQuad({-rx, wy, -rz}, {rx, wy, -rz}, {rx, wy + rh, 0}, {-rx, wy + rh, 0}, p.roofCol);
+            mb.addQuad({rx, wy, rz}, {-rx, wy, rz}, {-rx, wy + rh, 0}, {rx, wy + rh, 0}, p.roofCol);
+            mb.addTri({rx, wy, -rz}, {rx, wy, rz}, {rx, wy + rh, 0}, p.roofCol);
+            mb.addTri({-rx, wy, rz}, {-rx, wy, -rz}, {-rx, wy + rh, 0}, p.roofCol);
+        } else {
+            // Flat roof — contrasting cap slab
+            float capH = 0.15f;
+            mb.addBox({-wx - 0.1f, wy, -wz - 0.1f}, {wx + 0.1f, wy + capH, wz + 0.1f}, p.roofCol);
+        }
+
+        // ── Antenna (tall buildings) ──
+        if (p.hasAntenna) {
+            float ah = 3.0f, aw = 0.05f;
+            float topY = (p.roofHeight > 0.01f) ? (wy + p.roofHeight) : (wy + 0.15f);
+            mb.addBox({-aw, topY, -aw}, {aw, topY + ah, aw}, glm::vec4(0.3f, 0.3f, 0.3f, 1.0f));
+        }
     }
 
-    inline void getCarMesh(std::vector<V>& verts, std::vector<uint32_t>& idx, glm::vec4 bodyCol) {
+
+    // ── Parameterised car generator ──────────────────────────
+
+    struct CarParams {
+        float bodyLength  = 2.0f;   // half-extent X
+        float bodyHeight  = 1.2f;
+        float bodyWidth   = 1.0f;   // half-extent Z
+        float cabinStart  = -0.5f;
+        float cabinEnd    = 1.5f;
+        float cabinHeight = 1.0f;
+        bool  hasBed      = false;  // pickup truck bed
+        glm::vec4 bodyCol = glm::vec4(0.7f, 0.2f, 0.2f, 1.0f);
+    };
+
+    inline void getParametricCarMesh(std::vector<V>& verts, std::vector<uint32_t>& idx,
+                                      const CarParams& p) {
         verts.clear(); idx.clear();
         MeshBuilder mb{verts, idx};
 
-        float bx = 2.0f, by = 1.2f, bz = 1.0f;
-        mb.addBox({-bx, 0, -bz}, {bx, by, bz}, bodyCol);
+        float bx = p.bodyLength, by = p.bodyHeight, bz = p.bodyWidth;
+        mb.addBox({-bx, 0, -bz}, {bx, by, bz}, p.bodyCol);
 
-        float cx0 = -0.5f, cx1 = 1.5f, cy2 = by + 1.0f, cz = 0.9f;
-        mb.addBox({cx0, by, -cz}, {cx1, cy2, cz}, glm::vec4(0.6f, 0.8f, 1.0f, 1.0f));
+        // Cabin (glass)
+        glm::vec4 glassCol(0.6f, 0.8f, 1.0f, 1.0f);
+        float cz = bz * 0.9f;
+        mb.addBox({p.cabinStart, by, -cz}, {p.cabinEnd, by + p.cabinHeight, cz}, glassCol);
 
+        // Pickup bed (open-back walls)
+        if (p.hasBed) {
+            float bedStart = -bx;
+            float bedEnd   = p.cabinStart - 0.1f;
+            float bedH     = by * 0.4f;
+            glm::vec4 bedCol(p.bodyCol.r * 0.85f, p.bodyCol.g * 0.85f, p.bodyCol.b * 0.85f, 1.0f);
+            mb.addBox({bedStart, by, -bz - 0.05f}, {bedEnd, by + bedH, -bz + 0.15f}, bedCol);
+            mb.addBox({bedStart, by,  bz - 0.15f}, {bedEnd, by + bedH,  bz + 0.05f}, bedCol);
+            mb.addBox({bedStart - 0.05f, by, -bz}, {bedStart + 0.15f, by + bedH, bz}, bedCol);
+        }
+
+        // Wheels
         glm::vec4 wheelCol(0.15f, 0.15f, 0.15f, 1.0f);
         float wr = 0.35f;
+        float wlx1 = bx * 0.65f, wlx2 = -bx * 0.65f, wlz = bz + 0.1f;
         struct WP { float x, z; };
-        WP wheels[] = {{1.3f, 1.1f}, {1.3f, -1.1f}, {-1.3f, 1.1f}, {-1.3f, -1.1f}};
+        WP wheels[] = {{wlx1, wlz}, {wlx1, -wlz}, {wlx2, wlz}, {wlx2, -wlz}};
         for (auto& w : wheels) {
             mb.addBox({w.x - wr, 0, w.z - 0.15f}, {w.x + wr, wr * 2.0f, w.z + 0.15f}, wheelCol);
         }
     }
+
+
+    // ── Unchanged helpers ────────────────────────────────────
 
     inline void getLanternMesh(std::vector<V>& verts, std::vector<uint32_t>& idx, glm::vec3 bulbColor) {
         verts.clear(); idx.clear();
@@ -324,17 +485,19 @@ namespace ZoneHelpers {
 // ZoneStreamingLevel — a streaming world chunk.
 //
 // Each zone covers a rectangular region of the world.  Multiple
-// zones tile together like a continent.  They are streamed in / out
+// zones tile together to form a city.  They are streamed in / out
 // in the background without ANY loading screen.
 //
-// Constructor params:
-//   zoneId   — unique string, e.g. "zone_0_0"
-//   originX  — world-space X origin
-//   originZ  — world-space Z origin
-//   rows/cols — grid size inside the zone
-//   wallCol  — colour accent for this zone's houses
-//   carCol   — colour accent for this zone's cars
-//   lightCol — bulb colour for this zone's lanterns
+// Zone types (determined by distance from city centre):
+//   0 — Residential : small houses with peaked roofs, few cars
+//   1 — Commercial  : medium buildings, awnings, moderate traffic
+//   2 — Downtown    : tall skyscrapers with flat roofs, many cars
+//
+// Each zone generates:
+//   • 4 unique building mesh variants (random size / roof / windows)
+//   • 3 unique car mesh variants      (sedan / pickup / van)
+//   • A unique procedural texture (fire or water)
+// Then setupScene randomly places them across the zone's 3x3 grid.
 // ──────────────────────────────────────────────────────────────
 
 class ZoneStreamingLevel : public Lca::StreamingLevel {
@@ -345,41 +508,56 @@ class ZoneStreamingLevel : public Lca::StreamingLevel {
     glm::vec4 wallCol, carCol;
     glm::vec3 lightCol;
     glm::vec4 groundCol;
+    int   zoneType;           // 0=residential, 1=commercial, 2=downtown
 
     static constexpr float kSpacing = 14.0f;
 
-    // Mesh names unique to this zone (so zones don't clobber each other)
-    std::string houseMeshName, carMeshName, lanternMeshName,
-                groundMeshName, streetMeshName;
+    // ── Per-zone mesh / material variant names ──
+    static constexpr int kBuildingVariants = 4;
+    static constexpr int kCarVariants      = 3;
+
+    std::string buildingMeshNames[kBuildingVariants];
+    std::string carMeshNames[kCarVariants];
+
+    std::string lanternMeshName, groundMeshName, streetMeshName;
 
     // Per-zone texture & material names
     std::string zoneTextureName;
     std::string zoneHouseMatName;
-    bool        useFireTexture;   // true = fire, false = water
+    bool        useFireTexture;
 
-    // Entity names (for cleanup tracking — stored so cleanupScene can query them)
+    // Seed for deterministic random layout
+    uint32_t    layoutSeed;
+
+    // Entity tracking for cleanup
     std::vector<flecs::entity_t> ownedEntities;
 
 public:
     ZoneStreamingLevel(const std::string& id,
                        float ox, float oz, int r, int c,
                        glm::vec4 wall, glm::vec4 car,
-                       glm::vec3 light, glm::vec4 ground)
+                       glm::vec3 light, glm::vec4 ground,
+                       int type)
         : zoneId(id), originX(ox), originZ(oz),
           rows(r), cols(c),
-          wallCol(wall), carCol(car), lightCol(light), groundCol(ground)
+          wallCol(wall), carCol(car), lightCol(light), groundCol(ground),
+          zoneType(type)
     {
-        houseMeshName   = "house_"   + zoneId;
-        carMeshName     = "car_"     + zoneId;
+        for (int i = 0; i < kBuildingVariants; ++i)
+            buildingMeshNames[i] = "bldg_" + zoneId + "_" + std::to_string(i);
+        for (int i = 0; i < kCarVariants; ++i)
+            carMeshNames[i] = "car_" + zoneId + "_" + std::to_string(i);
+
         lanternMeshName = "lantern_" + zoneId;
         groundMeshName  = "ground_"  + zoneId;
         streetMeshName  = "street_"  + zoneId;
 
-        zoneTextureName = "tex_"     + zoneId;
-        zoneHouseMatName= "hmat_"    + zoneId;
+        zoneTextureName  = "tex_"  + zoneId;
+        zoneHouseMatName = "hmat_" + zoneId;
 
-        // Alternate fire / water based on grid position hash
-        // (even sum = fire, odd sum = water)
+        layoutSeed = static_cast<uint32_t>(std::hash<std::string>{}(zoneId));
+
+        // Alternate fire / water texture
         int colIdx = 0, rowIdx = 0;
         if (sscanf(id.c_str(), "zone_%d_%d", &colIdx, &rowIdx) != 2) {
             colIdx = 0; rowIdx = 0;
@@ -389,41 +567,130 @@ public:
 
     std::string getId() const override { return zoneId; }
 
-    // World-space center of this zone (for proximity checks)
     glm::vec2 getCenter() const {
         return glm::vec2(originX + cols * kSpacing * 0.5f,
                          originZ + rows * kSpacing * 0.5f);
     }
 
-    // ── Background thread: build zone meshes & texture ──
+    // ──────────────────────────────────────────────────────────
+    // Background thread: build meshes, texture, material
+    // ──────────────────────────────────────────────────────────
     void loadAssets() override {
         using V = Vertex::Mesh;
         std::vector<V> v;
-        std::vector<uint32_t> i;
+        std::vector<uint32_t> idx;
 
-        HardcodedMeshes6::getHouseMesh(v, i, wallCol);
-        Lca::Core::GetAssetManager().addMesh(houseMeshName, v, i);
+        ZoneRng rng(layoutSeed);
 
-        HardcodedMeshes6::getCarMesh(v, i, carCol);
-        Lca::Core::GetAssetManager().addMesh(carMeshName, v, i);
+        // ── Generate 4 building variants ──
+        for (int i = 0; i < kBuildingVariants; ++i) {
+            HardcodedMeshes6::BuildingParams bp;
 
-        HardcodedMeshes6::getLanternMesh(v, i, lightCol);
-        Lca::Core::GetAssetManager().addMesh(lanternMeshName, v, i);
+            switch (zoneType) {
+            case 0: // residential — small houses with peaked roofs
+                bp.width      = rng.nextFloat(1.8f, 3.5f);
+                bp.height     = rng.nextFloat(3.0f, 6.0f);
+                bp.depth      = rng.nextFloat(1.8f, 3.5f);
+                bp.roofHeight = rng.nextFloat(1.0f, 2.5f);
+                bp.windowRows = rng.nextInt(1, 2);
+                bp.windowCols = rng.nextInt(2, 3);
+                bp.hasAntenna = false;
+                break;
+
+            case 1: // commercial — medium buildings, sometimes flat roof
+                bp.width      = rng.nextFloat(2.5f, 5.0f);
+                bp.height     = rng.nextFloat(5.0f, 12.0f);
+                bp.depth      = rng.nextFloat(2.5f, 5.0f);
+                bp.roofHeight = rng.nextBool(0.3f) ? rng.nextFloat(0.5f, 1.5f) : 0.0f;
+                bp.windowRows = rng.nextInt(2, 5);
+                bp.windowCols = rng.nextInt(3, 5);
+                bp.hasAntenna = rng.nextBool(0.2f);
+                break;
+
+            case 2: // downtown — tall skyscrapers, flat roofs, antennas
+                bp.width      = rng.nextFloat(2.0f, 4.5f);
+                bp.height     = rng.nextFloat(10.0f, 30.0f);
+                bp.depth      = rng.nextFloat(2.0f, 4.5f);
+                bp.roofHeight = 0.0f;
+                bp.windowRows = rng.nextInt(5, 12);
+                bp.windowCols = rng.nextInt(3, 6);
+                bp.hasAntenna = rng.nextBool(0.4f);
+                break;
+            }
+
+            bp.wallCol = rng.varyColor(wallCol);
+            bp.roofCol = glm::vec4(rng.nextFloat(0.3f, 0.6f),
+                                   rng.nextFloat(0.15f, 0.4f),
+                                   rng.nextFloat(0.05f, 0.2f), 1.0f);
+            bp.doorCol   = glm::vec4(0.3f, 0.15f, 0.05f, 1.0f);
+            bp.windowCol = glm::vec4(0.55f + rng.nextFloat(0.0f, 0.15f),
+                                     0.75f + rng.nextFloat(0.0f, 0.15f),
+                                     0.95f, 0.9f);
+
+            HardcodedMeshes6::getBuildingMesh(v, idx, bp);
+            Lca::Core::GetAssetManager().addMesh(buildingMeshNames[i], v, idx);
+        }
+
+        // ── Generate 3 car variants (sedan / pickup / van) ──
+        for (int i = 0; i < kCarVariants; ++i) {
+            HardcodedMeshes6::CarParams cp;
+            int carType = i;  // one of each type per zone
+
+            switch (carType) {
+            case 0: // sedan
+                cp.bodyLength  = rng.nextFloat(1.6f, 2.2f);
+                cp.bodyHeight  = rng.nextFloat(0.9f, 1.3f);
+                cp.bodyWidth   = rng.nextFloat(0.8f, 1.1f);
+                cp.cabinStart  = rng.nextFloat(-0.5f, -0.1f);
+                cp.cabinEnd    = rng.nextFloat(1.0f, 1.5f);
+                cp.cabinHeight = rng.nextFloat(0.7f, 1.0f);
+                cp.hasBed      = false;
+                break;
+
+            case 1: // pickup truck
+                cp.bodyLength  = rng.nextFloat(2.2f, 3.0f);
+                cp.bodyHeight  = rng.nextFloat(1.1f, 1.5f);
+                cp.bodyWidth   = rng.nextFloat(0.9f, 1.2f);
+                cp.cabinStart  = rng.nextFloat(0.3f, 0.7f);
+                cp.cabinEnd    = cp.bodyLength * rng.nextFloat(0.8f, 0.95f);
+                cp.cabinHeight = rng.nextFloat(0.8f, 1.1f);
+                cp.hasBed      = true;
+                break;
+
+            case 2: // van
+                cp.bodyLength  = rng.nextFloat(2.0f, 2.8f);
+                cp.bodyHeight  = rng.nextFloat(1.4f, 1.8f);
+                cp.bodyWidth   = rng.nextFloat(0.9f, 1.2f);
+                cp.cabinStart  = rng.nextFloat(-0.2f, 0.2f);
+                cp.cabinEnd    = cp.bodyLength * rng.nextFloat(0.9f, 0.98f);
+                cp.cabinHeight = rng.nextFloat(0.4f, 0.7f);
+                cp.hasBed      = false;
+                break;
+            }
+
+            cp.bodyCol = rng.varyColor(carCol, 0.2f);
+
+            HardcodedMeshes6::getParametricCarMesh(v, idx, cp);
+            Lca::Core::GetAssetManager().addMesh(carMeshNames[i], v, idx);
+        }
+
+        // ── Lantern, ground, streets (unchanged) ──
+        HardcodedMeshes6::getLanternMesh(v, idx, lightCol);
+        Lca::Core::GetAssetManager().addMesh(lanternMeshName, v, idx);
 
         float xMin = originX;
         float xMax = originX + cols * kSpacing;
         float zMin = originZ;
         float zMax = originZ + rows * kSpacing;
 
-        HardcodedMeshes6::getGroundMesh(v, i, xMin - 5.0f, xMax + 5.0f, zMin - 5.0f, zMax + 5.0f, groundCol);
-        Lca::Core::GetAssetManager().addMesh(groundMeshName, v, i);
+        HardcodedMeshes6::getGroundMesh(v, idx, xMin - 5.0f, xMax + 5.0f,
+                                                zMin - 5.0f, zMax + 5.0f, groundCol);
+        Lca::Core::GetAssetManager().addMesh(groundMeshName, v, idx);
 
-        HardcodedMeshes6::getStreetMesh(v, i, xMin, xMax, zMin, zMax);
-        Lca::Core::GetAssetManager().addMesh(streetMeshName, v, i);
+        HardcodedMeshes6::getStreetMesh(v, idx, xMin, xMax, zMin, zMax);
+        Lca::Core::GetAssetManager().addMesh(streetMeshName, v, idx);
 
         // ── Per-zone procedural texture (fire or water) ──
-        // Each zone gets a unique seed derived from its id hash so every
-        // texture looks slightly different, simulating many unique assets.
         constexpr int kTexW = 64;
         constexpr int kTexH = 64;
         float seed = static_cast<float>(std::hash<std::string>{}(zoneId) % 10000) * 0.01f;
@@ -438,7 +705,6 @@ public:
         Lca::Core::Texture tex = Lca::Core::createTexture(kTexW, kTexH, pixels.data());
         Lca::Core::GetAssetManager().addTexture(zoneTextureName, tex);
 
-        // Per-zone house material referencing the new texture
         Lca::Core::Material houseMat{};
         houseMat.textureId = static_cast<int32_t>(
             Lca::Core::GetAssetManager().getTextureId(zoneTextureName));
@@ -447,14 +713,24 @@ public:
         Lca::Core::GetAssetManager().addMaterial(zoneHouseMatName, houseMat);
     }
 
-    // ── Main thread: create entities ──
+    // ──────────────────────────────────────────────────────────
+    // Main thread: create entities with randomised placement
+    // ──────────────────────────────────────────────────────────
     void setupScene(flecs::world& world) override {
-        uint32_t pipelineId  = Lca::Core::GetRenderer().getMeshPipelineId("basic");
-        uint32_t houseMeshId = Lca::Core::GetAssetManager().getMeshId(houseMeshName);
-        uint32_t carMeshId   = Lca::Core::GetAssetManager().getMeshId(carMeshName);
+        uint32_t pipelineId   = Lca::Core::GetRenderer().getMeshPipelineId("basic");
+
+        uint32_t bldgIds[kBuildingVariants];
+        for (int i = 0; i < kBuildingVariants; ++i)
+            bldgIds[i] = Lca::Core::GetAssetManager().getMeshId(buildingMeshNames[i]);
+
+        uint32_t carIds[kCarVariants];
+        for (int i = 0; i < kCarVariants; ++i)
+            carIds[i] = Lca::Core::GetAssetManager().getMeshId(carMeshNames[i]);
+
         uint32_t lanternId   = Lca::Core::GetAssetManager().getMeshId(lanternMeshName);
         uint32_t groundId    = Lca::Core::GetAssetManager().getMeshId(groundMeshName);
         uint32_t streetId    = Lca::Core::GetAssetManager().getMeshId(streetMeshName);
+
         uint32_t houseMatId  = Lca::Core::GetAssetManager().getMaterialId(zoneHouseMatName);
         uint32_t carMatId    = Lca::Core::GetAssetManager().getMaterialId("car_mat");
         uint32_t lanternMatId= Lca::Core::GetAssetManager().getMaterialId("lantern_mat");
@@ -462,62 +738,90 @@ public:
         uint32_t streetMatId = Lca::Core::GetAssetManager().getMaterialId("street_mat");
 
         ownedEntities.clear();
-
         auto track = [this](flecs::entity e) { ownedEntities.push_back(e.id()); };
 
-        // Ground
+        // ── Ground ──
         {
             auto e = world.entity();
             e.set(Component::Transform{glm::vec3(0.0f), 0.0f, glm::vec3(0,1,0), glm::vec3(1.0f)});
             e.add<Component::TransformID>();
             e.add<Component::Static>();
             track(e);
-
             auto m = world.entity();
             m.add(flecs::ChildOf, e);
             m.set<Component::Mesh>({groundId, groundMatId, pipelineId});
         }
 
-        // Streets
+        // ── Streets ──
         {
             auto e = world.entity();
             e.set(Component::Transform{glm::vec3(0.0f), 0.0f, glm::vec3(0,1,0), glm::vec3(1.0f)});
             e.add<Component::TransformID>();
             e.add<Component::Static>();
             track(e);
-
             auto m = world.entity();
             m.add(flecs::ChildOf, e);
             m.set<Component::Mesh>({streetId, streetMatId, pipelineId});
         }
 
-        // Grid of buildings, cars, lanterns
+        // ── Per-cell RNG (different sequence from loadAssets) ──
+        ZoneRng rng(layoutSeed + 54321u);
+
         for (int row = 0; row < rows; ++row) {
             for (int col = 0; col < cols; ++col) {
-                float bx = originX + col * kSpacing;
-                float bz = originZ + row * kSpacing;
+                float cellX = originX + col * kSpacing;
+                float cellZ = originZ + row * kSpacing;
 
-                // House
-                {
+                // ────────── Buildings ──────────
+                // Number of buildings per cell varies by zone type
+                int numBuildings;
+                switch (zoneType) {
+                    case 0: numBuildings = rng.nextInt(1, 2); break;  // residential
+                    case 1: numBuildings = rng.nextInt(1, 3); break;  // commercial
+                    case 2: numBuildings = rng.nextInt(2, 3); break;  // downtown
+                    default: numBuildings = 1; break;
+                }
+
+                for (int b = 0; b < numBuildings; ++b) {
+                    int variant = rng.nextInt(0, kBuildingVariants - 1);
+                    // Spread multiple buildings within the cell so they don't overlap
+                    float offX = (numBuildings == 1) ? 0.0f : rng.nextFloat(-3.0f, 3.0f);
+                    float offZ = (numBuildings == 1) ? 0.0f : rng.nextFloat(-3.0f, 3.0f);
+                    float angle = rng.nextFloat(0.0f, 6.2832f);
+                    float scale = rng.nextFloat(0.85f, 1.15f);
+
                     auto parent = world.entity();
                     parent.set(Component::Transform{
-                        glm::vec3(bx, 0.0f, bz),
-                        0.0f, glm::vec3(0,1,0), glm::vec3(1.0f)});
+                        glm::vec3(cellX + offX, 0.0f, cellZ + offZ),
+                        angle, glm::vec3(0,1,0), glm::vec3(scale)});
                     parent.add<Component::TransformID>();
                     parent.add<Component::Static>();
                     track(parent);
 
                     auto mesh = world.entity();
                     mesh.add(flecs::ChildOf, parent);
-                    mesh.set<Component::Mesh>({houseMeshId, houseMatId, pipelineId});
+                    mesh.set<Component::Mesh>({bldgIds[variant], houseMatId, pipelineId});
                 }
 
-                // Car
-                {
-                    float carAngle = ((row * cols + col) % 2 == 0) ? 0.0f : 3.14159f;
+                // ────────── Cars ──────────
+                int numCars;
+                switch (zoneType) {
+                    case 0: numCars = rng.nextInt(0, 1); break;
+                    case 1: numCars = rng.nextInt(1, 2); break;
+                    case 2: numCars = rng.nextInt(1, 3); break;
+                    default: numCars = 1; break;
+                }
+
+                for (int c = 0; c < numCars; ++c) {
+                    int variant = rng.nextInt(0, kCarVariants - 1);
+                    // Place cars along the roadside
+                    float carOffX = 5.0f + rng.nextFloat(-1.0f, 1.0f);
+                    float carOffZ = 4.5f + c * rng.nextFloat(2.5f, 4.0f);
+                    float carAngle = rng.nextBool() ? 0.0f : 3.14159f;
+
                     auto parent = world.entity();
                     parent.set(Component::Transform{
-                        glm::vec3(bx + 5.0f, 0.0f, bz + 4.5f),
+                        glm::vec3(cellX + carOffX, 0.0f, cellZ + carOffZ),
                         carAngle, glm::vec3(0,1,0), glm::vec3(1.0f)});
                     parent.add<Component::TransformID>();
                     parent.add<Component::Static>();
@@ -525,14 +829,14 @@ public:
 
                     auto mesh = world.entity();
                     mesh.add(flecs::ChildOf, parent);
-                    mesh.set<Component::Mesh>({carMeshId, carMatId, pipelineId});
+                    mesh.set<Component::Mesh>({carIds[variant], carMatId, pipelineId});
                 }
 
-                // Lantern + point light
+                // ────────── Lantern + point light ──────────
                 {
                     auto parent = world.entity();
                     parent.set(Component::Transform{
-                        glm::vec3(bx - 4.0f, 0.0f, bz + 5.5f),
+                        glm::vec3(cellX - 4.0f, 0.0f, cellZ + 5.5f),
                         0.0f, glm::vec3(0,1,0), glm::vec3(1.0f)});
                     parent.add<Component::TransformID>();
                     parent.add<Component::Static>();
@@ -542,14 +846,15 @@ public:
                     mesh.add(flecs::ChildOf, parent);
                     mesh.set<Component::Mesh>({lanternId, lanternMatId, pipelineId});
 
+                    float lightIntensity = (zoneType == 2) ? 120.0f : 80.0f;
                     auto light = world.entity();
                     light.set(Component::Transform{
-                        glm::vec3(bx - 4.0f + 1.0f, 4.85f, bz + 5.5f),
+                        glm::vec3(cellX - 4.0f + 1.0f, 4.85f, cellZ + 5.5f),
                         0.0f, glm::vec3(0,1,0), glm::vec3(1.0f)});
                     light.add<Component::Static>();
                     light.set(Component::PointLight{
                         .color     = lightCol,
-                        .intensity = 80.0f,
+                        .intensity = lightIntensity,
                         .radius    = 18.0f
                     });
                     track(light);
@@ -558,26 +863,25 @@ public:
         }
     }
 
-    // ── Main thread: destroy owned entities and remove zone assets ──
+    // ──────────────────────────────────────────────────────────
+    // Main thread: destroy owned entities and remove zone assets
+    // ──────────────────────────────────────────────────────────
     void cleanupScene(flecs::world& world) override {
         for (auto id : ownedEntities) {
             auto e = world.entity(id);
-            if (e.is_alive()) {
-                e.destruct();
-            }
+            if (e.is_alive()) e.destruct();
         }
         ownedEntities.clear();
 
-        // Remove zone-specific meshes so they can be re-added on next stream-in
-        Lca::Core::GetAssetManager().removeMesh(houseMeshName);
-        Lca::Core::GetAssetManager().removeMesh(carMeshName);
+        for (int i = 0; i < kBuildingVariants; ++i)
+            Lca::Core::GetAssetManager().removeMesh(buildingMeshNames[i]);
+        for (int i = 0; i < kCarVariants; ++i)
+            Lca::Core::GetAssetManager().removeMesh(carMeshNames[i]);
+
         Lca::Core::GetAssetManager().removeMesh(lanternMeshName);
         Lca::Core::GetAssetManager().removeMesh(groundMeshName);
         Lca::Core::GetAssetManager().removeMesh(streetMeshName);
 
-        // Remove per-zone texture and material (GPU resources are destroyed —
-        // Application::processStreaming will call updatePipelineDescriptorSets
-        // afterwards so descriptor sets no longer reference stale handles)
         Lca::Core::GetAssetManager().removeMaterial(zoneHouseMatName);
         Lca::Core::GetAssetManager().removeTexture(zoneTextureName);
     }
@@ -588,8 +892,10 @@ public:
 // CityLevel — loaded with loadLevel() at startup (loading screen).
 //
 // Owns the 10x10 streaming zone grid and the proximity ECS system.
-// Different Level subclasses can have entirely different collections
-// of streaming levels — each Level owns its own set.
+// Zone type is determined by distance from the grid centre:
+//   inner ring  → downtown  (skyscrapers)
+//   middle ring → commercial (medium buildings)
+//   outer ring  → residential (small houses)
 // ──────────────────────────────────────────────────────────────
 
 class CityLevel : public Lca::Level {
@@ -655,6 +961,9 @@ public:
         const float startX = -totalW * 0.5f;
         const float startZ = -totalH * 0.5f;
 
+        const float centreCol = (ZoneRegistry::kGridX - 1) * 0.5f;   // 4.5
+        const float centreRow = (ZoneRegistry::kGridZ - 1) * 0.5f;
+
         for (int row = 0; row < ZoneRegistry::kGridZ; ++row) {
             for (int col = 0; col < ZoneRegistry::kGridX; ++col) {
                 float ox = startX + col * (zoneW + ZoneRegistry::kGap);
@@ -665,10 +974,20 @@ public:
                 glm::vec3 lightCol  = glm::vec3(ZoneHelpers::colorFromGrid(col, row, 0.9f, 0.6f, 1.0f));
                 glm::vec4 groundCol = ZoneHelpers::colorFromGrid(col, row, 0.3f,  0.25f, 0.45f);
 
+                // Zone type based on distance from grid centre
+                float dx = col - centreCol;
+                float dz = row - centreRow;
+                float dist = std::sqrt(dx * dx + dz * dz);
+                int zoneType;
+                if (dist < 2.0f)      zoneType = 2;  // downtown
+                else if (dist < 4.0f) zoneType = 1;  // commercial
+                else                  zoneType = 0;  // residential
+
                 reg.zone(col, row) = std::make_shared<ZoneStreamingLevel>(
                     ZoneHelpers::zoneId(col, row), ox, oz,
                     ZoneRegistry::kZoneRows, ZoneRegistry::kZoneCols,
-                    wallCol, carCol, lightCol, groundCol
+                    wallCol, carCol, lightCol, groundCol,
+                    zoneType
                 );
             }
         }

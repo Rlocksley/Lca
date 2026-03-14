@@ -30,8 +30,8 @@ protected:
 
         // Pipeline
         Core::GraphicsPipelineConfig pipelineConfig{};
-        pipelineConfig.vertexShader   = "shader/mesh_basic.vert.spv";
-        pipelineConfig.fragmentShader = "shader/mesh_basic.frag.spv";
+        pipelineConfig.vertexShader   = "shader/mesh_pbr.vert.spv";
+        pipelineConfig.fragmentShader = "shader/mesh_pbr.frag.spv";
         Core::MeshPipeline meshPipeline(pipelineConfig);
         Core::GetRenderer().addMeshPipeline("basic", std::move(meshPipeline), 16384);
 
@@ -40,7 +40,7 @@ protected:
         Core::GetAssetManager().addMesh("cube", _cube.getVertices(), _cube.getIndices());
         Core::Material cubeMat{};
         cubeMat.metallic  = 1.0f;
-        cubeMat.roughness = 0.5f;
+        cubeMat.roughness = 0.01f;
         cubeMat.textureId = -1;
         Core::GetAssetManager().addMaterial("loadingCubeMat", cubeMat);
 
