@@ -1,7 +1,7 @@
 #pragma once
 
 
-//#define LCA_DEBUG
+#define LCA_DEBUG
 
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
@@ -38,6 +38,7 @@
 #include "glm/gtc/quaternion.hpp"
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/quaternion.hpp>
+#include <glm/gtx/matrix_decompose.hpp>
 
 #define LCA_LOGI(X, Y, Z)\
 {\

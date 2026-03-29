@@ -1,0 +1,205 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : enable
+
+// Define the workgroup size
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// ------------------------------------------------------------------
+// Structs
+// ------------------------------------------------------------------
+
+// Fits VkDrawIndexedIndirectCommand
+struct DrawIndexedIndirectCommand {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int  vertexOffset;
+    uint firstInstance;
+};
+
+struct ModelMatrix{
+    mat4 model;
+    mat4 normal;
+    vec4 scale; // xyz = scale, w = padding
+    vec4 rotation; // quaternion
+    vec4 position;
+};
+
+struct SkeletonMeshInstance {
+    uint transformID;
+    uint shaderID;
+    uint meshID;
+    uint materialID;
+    uint skeletonInstanceID;
+    int  nodeIndex;
+};
+
+struct MeshInfo {
+    uint indexCount;
+    uint firstIndex;
+    uint vertexCount;
+    int  vertexOffset;
+    vec4 boundingSphere; // xyz = local center, w = radius
+};
+
+// ------------------------------------------------------------------
+// Bindings
+// ------------------------------------------------------------------
+
+// Binding 0: Camera / Frustum Data
+layout(set = 0, binding = 0) uniform CameraData {
+    vec4 frustumPlanes[6];
+    mat4 projection;
+    mat4 view;
+    mat4 viewProjection;
+    mat4 inverseProjection;
+    vec4 camPos;
+    vec4 camDir;
+    vec2 screenSize;
+    float nearClip;
+    float farClip;
+} cam;
+
+// Binding 1: All skeleton mesh instances
+const uint MAX_BONES_PER_SKELETON = 256;
+const uint MATS_PER_SKELETON = MAX_BONES_PER_SKELETON * 2;
+
+layout(set = 0, binding = 1) readonly buffer SkeletonMeshInstanceBuffer {
+    SkeletonMeshInstance instances[];
+} objects;
+
+layout(set = 0, binding = 2) readonly buffer ModelMatrixBuffer {
+    ModelMatrix transforms[];
+} modelMatrices;
+
+// Binding 3: Skeleton Mesh Registry (lookup for index counts, offsets, bounding sphere)
+layout(set = 0, binding = 3) readonly buffer MeshBuffer {
+    MeshInfo meshes[];
+} meshData;
+
+// Binding 4: Atomic draw counts per shader
+layout(set = 0, binding = 4) buffer Counters {
+    uint count[];
+} drawCounts;
+
+// Binding 5: Per-shader indirect buffers (variable-count descriptor array)
+layout(set = 0, binding = 5) writeonly buffer IndirectDraws {
+    DrawIndexedIndirectCommand commands[];
+} indirectBuffers[];
+
+layout(set = 0, binding = 6) readonly buffer IndirectCapacities {
+    uint capacity[];
+} indirectCapacities;
+
+// Binding 7: Depth pre-pass indirect buffer for skeleton meshes
+layout(set = 0, binding = 7) writeonly buffer DepthPrePassDraws {
+    DrawIndexedIndirectCommand commands[];
+} depthPrePass;
+
+// Binding 8: Depth pre-pass draw count (single atomic uint)
+layout(set = 0, binding = 8) buffer DepthPrePassCounter {
+    uint count;
+} depthPrePassCount;
+
+// Binding 9: Skeleton instance buffer (mat4 data for bone transforms)
+layout(set = 0, binding = 9) readonly buffer SkeletonInstanceBuffer {
+    mat4 data[];
+} skeletonInstances;
+
+// ------------------------------------------------------------------
+// Helper Functions
+// ------------------------------------------------------------------
+
+bool isVisible(vec4 sphere) {
+    for (int i = 0; i < 6; i++) {
+        if (dot(cam.frustumPlanes[i], vec4(sphere.xyz, 1.0)) < -sphere.w) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool tryReserveCommandSlot(uint shaderIndex, uint maxCommands, out uint cmdIndex) {
+    cmdIndex = atomicAdd(drawCounts.count[shaderIndex], 1);
+    return cmdIndex < maxCommands;
+}
+
+// ------------------------------------------------------------------
+// Main
+// ------------------------------------------------------------------
+
+void main() {
+    uint gID = gl_GlobalInvocationID.x;
+
+    if (gID >= objects.instances.length()) {
+        return;
+    }
+
+    SkeletonMeshInstance obj = objects.instances[gID];
+
+    // Empty/invalid slot check
+    if (obj.transformID == 0xFFFFFFFF) {
+        return;
+    }
+
+    if (obj.meshID >= meshData.meshes.length()) {
+        return;
+    }
+    MeshInfo mesh = meshData.meshes[obj.meshID];
+
+    // Transform bounding sphere to world space
+    vec3 worldCenter;
+    float worldRadius;
+
+    if (obj.nodeIndex >= 0) {
+        // Attached mesh: apply bone transform before model matrix
+        uint base = obj.skeletonInstanceID * MATS_PER_SKELETON;
+        mat4 boneTransform = skeletonInstances.data[base + MAX_BONES_PER_SKELETON + obj.nodeIndex];
+        mat4 fullTransform = modelMatrices.transforms[obj.transformID].model * boneTransform;
+        worldCenter = (fullTransform * vec4(mesh.boundingSphere.xyz, 1.0)).xyz;
+        vec3 c0 = fullTransform[0].xyz;
+        vec3 c1 = fullTransform[1].xyz;
+        vec3 c2 = fullTransform[2].xyz;
+        float maxScale = max(max(length(c0), length(c1)), length(c2));
+        worldRadius = mesh.boundingSphere.w * maxScale;
+    } else {
+        // Deformed mesh: model matrix only
+        worldCenter = (modelMatrices.transforms[obj.transformID].model *
+                        vec4(mesh.boundingSphere.xyz, 1.0)).xyz;
+        vec4 scale = modelMatrices.transforms[obj.transformID].scale;
+        worldRadius = mesh.boundingSphere.w * max(max(abs(scale.x), abs(scale.y)), abs(scale.z));
+    }
+
+    if (isVisible(vec4(worldCenter, worldRadius))) {
+
+        DrawIndexedIndirectCommand cmd;
+        cmd.indexCount    = mesh.indexCount;
+        cmd.instanceCount = 1;
+        cmd.firstIndex    = mesh.firstIndex;
+        cmd.vertexOffset  = mesh.vertexOffset;
+        cmd.firstInstance = gID; // Pass global slot ID via gl_InstanceIndex
+
+        // Write to the skeleton depth pre-pass buffer
+        uint depthSlot = atomicAdd(depthPrePassCount.count, 1);
+        if (depthSlot < depthPrePass.commands.length()) {
+            depthPrePass.commands[depthSlot] = cmd;
+        }
+
+        // Write to the per-shader indirect buffer
+        uint shaderIndex = obj.shaderID;
+        if (shaderIndex >= indirectCapacities.capacity.length()) {
+            return;
+        }
+        uint maxCommands = indirectCapacities.capacity[shaderIndex];
+        if (maxCommands == 0) {
+            return;
+        }
+
+        uint cmdIndex = 0;
+        if (!tryReserveCommandSlot(shaderIndex, maxCommands, cmdIndex)) {
+            return;
+        }
+
+        indirectBuffers[nonuniformEXT(shaderIndex)].commands[cmdIndex] = cmd;
+    }
+}

@@ -7,8 +7,11 @@
 #include "Vertex.hpp"
 #include "Pipeline.hpp"
 #include "MeshPipeline.hpp"
+#include "SkeletonMeshPipeline.hpp"
 #include "UberCullPipeline.hpp"
 #include "DepthPipeline.hpp"
+#include "SkeletonDepthPipeline.hpp"
+#include "SkeletonCullPipeline.hpp"
 #include "LightCullPipeline.hpp"
 
 namespace Lca {
@@ -64,6 +67,23 @@ namespace Lca {
             uint32_t shaderID{UINT32_MAX};       // Index of the IndirectBuffer to write to
             uint32_t meshID{UINT32_MAX};         // ID to look up mesh details (indexCount, etc)
             uint32_t materialID{UINT32_MAX};
+        };
+
+        struct SkeletonMeshInstance {
+            uint32_t transformID{UINT32_MAX};
+            uint32_t shaderID{UINT32_MAX};
+            uint32_t meshID{UINT32_MAX};
+            uint32_t materialID{UINT32_MAX};
+            uint32_t skeletonInstanceID{UINT32_MAX};
+            int32_t nodeIndex{-1}; // -1 for deformed, >= 0 for node-attached
+        };
+
+        static constexpr uint32_t MAX_SKELETON_INSTANCES = 1024;
+        static constexpr uint32_t MAX_BONES_PER_SKELETON = 256;
+
+        struct SkeletonInstance {
+            glm::mat4 boneWithInvBindMatrices[MAX_BONES_PER_SKELETON];
+            glm::mat4 boneTransform[MAX_BONES_PER_SKELETON];
         };
 
         class Renderer{
@@ -122,6 +142,33 @@ namespace Lca {
             void updateCamera(uint32_t frameIndex, glm::vec3 position, glm::vec3 direction, float fov, float nearClip, float farClip);
             Texture& getDepthMap(uint32_t frameIndex);
             const Buffer getLightIndicesBuffer(uint32_t frameIndex) const { return lightIndicesBuffer[frameIndex]; }
+
+            // ── Skeleton mesh instances ────────────────────────────
+            uint32_t addSkeletonMeshInstance(const SkeletonMeshInstance& instance);
+            void updateSkeletonMeshInstance(uint32_t id, const SkeletonMeshInstance& instance);
+            void removeSkeletonMeshInstance(uint32_t id);
+            void copySkeletonMeshInstancesToGPU(uint32_t frameIndex){
+                dirtySkeletonMeshInstanceIndices[frameIndex] = skeletonMeshInstances.copyTo(skeletonMeshInstancesGPU[frameIndex].interface);
+            }
+            const Buffer getSkeletonMeshInstanceBuffer(uint32_t frameIndex) const { return skeletonMeshInstancesGPU[frameIndex].buffer; }
+
+            // ── Skeleton instances (bone matrices) ─────────────────
+            uint32_t addSkeletonInstance();
+            void updateSkeletonInstance(uint32_t frameIndex, uint32_t id, const SkeletonInstance& instance);
+            void removeSkeletonInstance(uint32_t id);
+            const Buffer getSkeletonInstanceBuffer(uint32_t frameIndex) const { return skeletonInstancesGPU[frameIndex].buffer; }
+
+            // ── Skeleton mesh pipelines ────────────────────────────
+            uint32_t addSkeletonMeshPipeline(const std::string& name, SkeletonMeshPipeline&& pipeline, uint32_t maxObjects = MAX_OBJECTS);
+            uint32_t getSkeletonMeshPipelineId(const std::string& name) const;
+            const std::vector<Buffer>& getSkeletonIndirectBuffers(uint32_t frameIndex) const { return skeletonIndirectBuffers[frameIndex]; }
+            const Buffer getSkeletonDrawCountBuffer(uint32_t frameIndex) const { return skeletonDrawCounts[frameIndex]; }
+            const Buffer getSkeletonShaderCapacityBuffer() const { return skeletonShaderCapacities.buffer; }
+            VkBuffer getSkeletonDummyIndirectVkBuffer() const { return skeletonDummyIndirectBuffer.vkBuffer; }
+
+            // Skeleton depth pre-pass buffers
+            std::array<Buffer, MAX_FRAMES_IN_FLIGHT> skeletonDepthPrePassBuffer;
+            std::array<Buffer, MAX_FRAMES_IN_FLIGHT> skeletonDepthPrePassCountBuffer;
           
         private:
             
@@ -160,6 +207,27 @@ namespace Lca {
             std::array<Buffer, MAX_FRAMES_IN_FLIGHT> drawCounts;
             DualBuffer shaderCapacities;
             std::array<DualBuffer, MAX_FRAMES_IN_FLIGHT> cameraBuffer;
+
+            // ── Skeleton mesh instance data ────────────────────────
+            SlotBuffer<SkeletonMeshInstance, MAX_OBJECTS> skeletonMeshInstances;
+            std::array<DualBuffer, MAX_FRAMES_IN_FLIGHT> skeletonMeshInstancesGPU;
+            std::array<std::vector<uint32_t>, MAX_FRAMES_IN_FLIGHT> dirtySkeletonMeshInstanceIndices;
+
+            // ── Skeleton instance data (bone matrices) ─────────────
+            std::array<DualBuffer, MAX_FRAMES_IN_FLIGHT> skeletonInstancesGPU;
+            std::array<std::vector<uint32_t>, MAX_FRAMES_IN_FLIGHT> dirtySkeletonInstanceIndices_;
+            std::vector<uint32_t> freeSkeletonInstanceSlots;
+            uint32_t skeletonInstanceCount{0};
+
+            // ── Skeleton mesh pipeline data ────────────────────────
+            std::vector<SkeletonMeshPipeline> skeletonMeshPipelines;
+            std::unordered_map<std::string, uint32_t> skeletonMeshPipelineMap;
+            std::array<std::vector<Buffer>, MAX_FRAMES_IN_FLIGHT> skeletonIndirectBuffers;
+            Buffer skeletonDummyIndirectBuffer;
+            std::array<Buffer, MAX_FRAMES_IN_FLIGHT> skeletonDrawCounts;
+            DualBuffer skeletonShaderCapacities;
+            std::unique_ptr<SkeletonDepthPipeline> skeletonDepthPipeline;
+            std::unique_ptr<SkeletonCullPipeline> skeletonCullPipeline;
 
             
             glm::mat4 createViewMatrix(const glm::vec3& cameraPosition, const glm::vec3& cameraDirection, const glm::vec3& upDirection);

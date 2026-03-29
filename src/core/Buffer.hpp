@@ -106,6 +106,7 @@ namespace Lca
             }
 
             void recordSync(const Command& command){
+                if(size == 0) return;
                 VkBufferCopy copyRegion{};
                 copyRegion.size = size * interface.elementSize;
                 vkCmdCopyBuffer(

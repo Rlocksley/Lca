@@ -43,12 +43,46 @@ namespace Lca{
                 const uint32_t entriesPerTile = MAX_LIGHTS_PER_TILE + 1u; // count + indices
                 const uint32_t totalElements = tilesX * tilesY * entriesPerTile;
                 lightIndicesBuffer[i] = createBuffer(totalElements, sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+
+                // ── Skeleton mesh rendering buffers ───────────────────
+                skeletonMeshInstancesGPU[i] = createDualBuffer(Lca::Core::MAX_OBJECTS, sizeof(SkeletonMeshInstance), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+                skeletonInstancesGPU[i] = createDualBuffer(Lca::Core::MAX_SKELETON_INSTANCES, sizeof(SkeletonInstance), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+                skeletonDrawCounts[i] = createBuffer(Lca::Core::MAX_SHADERS, sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+                skeletonDepthPrePassBuffer[i] = createBuffer(Lca::Core::MAX_OBJECTS, sizeof(VkDrawIndexedIndirectCommand), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+                skeletonDepthPrePassCountBuffer[i] = createBuffer(1, sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
                 
             }
 
             shaderCapacities = createDualBuffer(Lca::Core::MAX_SHADERS, sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
             memset(shaderCapacities.interface.pMemory, 0, Lca::Core::MAX_SHADERS * sizeof(uint32_t));
             dummyIndirectBuffer = createBuffer(Lca::Core::MAX_OBJECTS, sizeof(VkDrawIndexedIndirectCommand), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+
+            skeletonShaderCapacities = createDualBuffer(Lca::Core::MAX_SHADERS, sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+            memset(skeletonShaderCapacities.interface.pMemory, 0, Lca::Core::MAX_SHADERS * sizeof(uint32_t));
+            skeletonDummyIndirectBuffer = createBuffer(Lca::Core::MAX_OBJECTS, sizeof(VkDrawIndexedIndirectCommand), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+
+            // Fill GPU-side instance buffers with 0xFFFFFFFF so every
+            // uninitialised slot has transformID == UINT32_MAX and is
+            // rejected by the cull shaders' invalid-slot check.
+            // Without this, the 250 zero-filled slots in the last
+            // dispatch workgroup pass the check and generate ghost draw
+            // commands, destroying framerate.
+            beginSingleCommand(singleCommand);
+            for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                memset(objectInstancesGPU[i].interface.pMemory, 0xFF,
+                       MAX_OBJECTS * sizeof(ObjectInstance));
+                vkCmdFillBuffer(singleCommand.vkCommandBuffer,
+                                objectInstancesGPU[i].buffer.vkBuffer,
+                                0, VK_WHOLE_SIZE, 0xFFFFFFFF);
+
+                memset(skeletonMeshInstancesGPU[i].interface.pMemory, 0xFF,
+                       MAX_OBJECTS * sizeof(SkeletonMeshInstance));
+                vkCmdFillBuffer(singleCommand.vkCommandBuffer,
+                                skeletonMeshInstancesGPU[i].buffer.vkBuffer,
+                                0, VK_WHOLE_SIZE, 0xFFFFFFFF);
+            }
+            endSingleCommand(singleCommand);
+            submitSingleCommand(singleCommand);
 
             uberCullPipeline = std::make_unique<UberCullPipeline>("shader/uber_cull.comp.spv");
             uberCullPipeline->build();
@@ -71,6 +105,15 @@ namespace Lca{
 
             depthPipeline = std::make_unique<DepthPipeline>(depthPipelineConfig);
             depthPipeline->build();
+
+            // Skeleton depth pipeline: same config but with a skinning depth shader
+            GraphicsPipelineConfig skeletonDepthConfig = depthPipelineConfig;
+            skeletonDepthConfig.vertexShader = "shader/skeleton_depth.vert.spv";
+            skeletonDepthPipeline = std::make_unique<SkeletonDepthPipeline>(skeletonDepthConfig);
+            skeletonDepthPipeline->build();
+
+            skeletonCullPipeline = std::make_unique<SkeletonCullPipeline>("shader/skeleton_cull.comp.spv");
+            skeletonCullPipeline->build();
             
             lightCullPipeline = std::make_unique<LightCullPipeline>("shader/light_cull.comp.spv");
             lightCullPipeline->build();
@@ -78,7 +121,9 @@ namespace Lca{
 
         void Renderer::shutdown(){
             uberCullPipeline.reset();
+            skeletonCullPipeline.reset();
             depthPipeline.reset();
+            skeletonDepthPipeline.reset();
             lightCullPipeline.reset();
 
             for(uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
@@ -91,9 +136,18 @@ namespace Lca{
                 destroyBuffer(lightIndicesBuffer[i]);
                 destroyBuffer(depthPrePassBuffer[i]);
                 destroyBuffer(depthPrePassCountBuffer[i]);
+
+                destroyDualBuffer(skeletonMeshInstancesGPU[i]);
+                destroyDualBuffer(skeletonInstancesGPU[i]);
+                destroyBuffer(skeletonDrawCounts[i]);
+                destroyBuffer(skeletonDepthPrePassBuffer[i]);
+                destroyBuffer(skeletonDepthPrePassCountBuffer[i]);
             }
             destroyDualBuffer(shaderCapacities);
             destroyBuffer(dummyIndirectBuffer);
+
+            destroyDualBuffer(skeletonShaderCapacities);
+            destroyBuffer(skeletonDummyIndirectBuffer);
 
             for(auto& buffer : indirectBuffers) {
                 for(auto& buf : buffer) {
@@ -102,13 +156,26 @@ namespace Lca{
                 buffer.clear();
             }
 
+            for(auto& buffer : skeletonIndirectBuffers) {
+                for(auto& buf : buffer) {
+                    destroyBuffer(buf);
+                }
+                buffer.clear();
+            }
+
             meshPipelineMap.clear();
             meshPipelines.clear();
+
+            skeletonMeshPipelineMap.clear();
+            skeletonMeshPipelines.clear();
         }
 
         void Renderer::updatePipelineDescriptorSets(){
             for (auto& meshPipeline : meshPipelines) {
                 meshPipeline.updateDescriptorSetWrites();
+            }
+            for (auto& skeletonPipeline : skeletonMeshPipelines) {
+                skeletonPipeline.updateDescriptorSetWrites();
             }
         }
         
@@ -131,8 +198,18 @@ namespace Lca{
             lightsGPU[frameIndex].recordSync(command[frameIndex]);
             GetAssetManager().recordSync(command[frameIndex]);
 
+            // Skeleton mesh instance and bone matrix uploads
+            skeletonMeshInstancesGPU[frameIndex].recordSyncRanges(command[frameIndex], dirtySkeletonMeshInstanceIndices[frameIndex]);
+            skeletonInstancesGPU[frameIndex].recordSyncRanges(command[frameIndex], dirtySkeletonInstanceIndices_[frameIndex]);
+            dirtySkeletonInstanceIndices_[frameIndex].clear();
+
             vkCmdFillBuffer(command[frameIndex].vkCommandBuffer, drawCounts[frameIndex].vkBuffer, 0, VK_WHOLE_SIZE, 0);
             for (auto& indirectBuffer : indirectBuffers[frameIndex]) {
+                vkCmdFillBuffer(command[frameIndex].vkCommandBuffer, indirectBuffer.vkBuffer, 0, VK_WHOLE_SIZE, 0);
+            }
+            // Clear skeleton draw counts and indirect buffers
+            vkCmdFillBuffer(command[frameIndex].vkCommandBuffer, skeletonDrawCounts[frameIndex].vkBuffer, 0, VK_WHOLE_SIZE, 0);
+            for (auto& indirectBuffer : skeletonIndirectBuffers[frameIndex]) {
                 vkCmdFillBuffer(command[frameIndex].vkCommandBuffer, indirectBuffer.vkBuffer, 0, VK_WHOLE_SIZE, 0);
             }
             // Clear depth pre-pass buffers — only zero the portion that the
@@ -145,6 +222,13 @@ namespace Lca{
                 vkCmdFillBuffer(command[frameIndex].vkCommandBuffer, depthPrePassBuffer[frameIndex].vkBuffer, 0, fillSize, 0);
             }
             vkCmdFillBuffer(command[frameIndex].vkCommandBuffer, depthPrePassCountBuffer[frameIndex].vkBuffer, 0, VK_WHOLE_SIZE, 0);
+            // Clear skeleton depth pre-pass buffers
+            {
+                const VkDeviceSize usedBytes = static_cast<VkDeviceSize>(skeletonMeshInstances.getSize()) * sizeof(VkDrawIndexedIndirectCommand);
+                const VkDeviceSize fillSize  = usedBytes > 0 ? usedBytes : 4;
+                vkCmdFillBuffer(command[frameIndex].vkCommandBuffer, skeletonDepthPrePassBuffer[frameIndex].vkBuffer, 0, fillSize, 0);
+            }
+            vkCmdFillBuffer(command[frameIndex].vkCommandBuffer, skeletonDepthPrePassCountBuffer[frameIndex].vkBuffer, 0, VK_WHOLE_SIZE, 0);
             vkCmdFillBuffer(command[frameIndex].vkCommandBuffer, lightIndicesBuffer[frameIndex].vkBuffer, 0, VK_WHOLE_SIZE, 0);
 
             VkMemoryBarrier transferToShaderBarrier{};
@@ -192,8 +276,36 @@ namespace Lca{
                     const uint32_t groupCountX = (objectInstances.getSize() + WORKGROUP_SIZE_X - 1) / WORKGROUP_SIZE_X;
                     vkCmdDispatch(command[frameIndex].vkCommandBuffer, groupCountX, 1, 1);
                 }
-                // Ensure UberCull compute writes (depth pre-pass lists) are
-                // visible to the subsequent depth pre-pass indirect draw.
+            }
+
+            // --- Skeleton cull compute dispatch ---
+            {
+                VkDescriptorSet descriptorSet = skeletonCullPipeline->getVkDescriptorSet(frameIndex);
+                vkCmdBindPipeline(
+                    command[frameIndex].vkCommandBuffer,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    skeletonCullPipeline->getVkPipeline()
+                );
+                vkCmdBindDescriptorSets(
+                    command[frameIndex].vkCommandBuffer,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    skeletonCullPipeline->getVkPipelineLayout(),
+                    0,
+                    1,
+                    &descriptorSet,
+                    0,
+                    nullptr
+                );
+
+                constexpr uint32_t WORKGROUP_SIZE_X = 256;
+                if (skeletonMeshInstances.getSize() > 0) {
+                    const uint32_t groupCountX = (skeletonMeshInstances.getSize() + WORKGROUP_SIZE_X - 1) / WORKGROUP_SIZE_X;
+                    vkCmdDispatch(command[frameIndex].vkCommandBuffer, groupCountX, 1, 1);
+                }
+            }
+
+            {
+                // Ensure compute writes are visible to the subsequent depth pre-pass indirect draw.
                 VkMemoryBarrier uberToDepthBarrier{};
                 uberToDepthBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
                 uberToDepthBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -299,6 +411,42 @@ namespace Lca{
                     depthPrePassCountBuffer[frameIndex].vkBuffer,
                     0,
                     depthPrePassBuffer[frameIndex].numberElements,
+                    sizeof(VkDrawIndexedIndirectCommand)
+                );
+
+                // --- Skeleton depth pre-pass ---
+                vkCmdBindPipeline(
+                    command[frameIndex].vkCommandBuffer,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    skeletonDepthPipeline->getVkPipeline()
+                );
+                VkDescriptorSet skelDepthDesc = skeletonDepthPipeline->getVkDescriptorSet(frameIndex);
+                vkCmdBindDescriptorSets(
+                    command[frameIndex].vkCommandBuffer,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    skeletonDepthPipeline->getVkPipelineLayout(),
+                    0,
+                    1,
+                    &skelDepthDesc,
+                    0,
+                    nullptr
+                );
+
+                {
+                    const Buffer skelVertexBuffer = GetAssetManager().getSkeletonVertexBuffer();
+                    const Buffer skelIndexBuffer = GetAssetManager().getSkeletonIndexBuffer();
+                    VkBuffer vkSkelVertexBuffer = skelVertexBuffer.vkBuffer;
+                    vkCmdBindVertexBuffers(command[frameIndex].vkCommandBuffer, 0, 1, &vkSkelVertexBuffer, offsets);
+                    vkCmdBindIndexBuffer(command[frameIndex].vkCommandBuffer, skelIndexBuffer.vkBuffer, 0, VK_INDEX_TYPE_UINT32);
+                }
+
+                vkCmdDrawIndexedIndirectCount(
+                    command[frameIndex].vkCommandBuffer,
+                    skeletonDepthPrePassBuffer[frameIndex].vkBuffer,
+                    0,
+                    skeletonDepthPrePassCountBuffer[frameIndex].vkBuffer,
+                    0,
+                    skeletonDepthPrePassBuffer[frameIndex].numberElements,
                     sizeof(VkDrawIndexedIndirectCommand)
                 );
 
@@ -490,6 +638,51 @@ namespace Lca{
                     );
                 }
 
+                // --- Skeleton mesh rendering ---
+                {
+                    const Buffer skelVertexBuffer = GetAssetManager().getSkeletonVertexBuffer();
+                    const Buffer skelIndexBuffer = GetAssetManager().getSkeletonIndexBuffer();
+                    VkBuffer vkSkelVertexBuffer = skelVertexBuffer.vkBuffer;
+                    vkCmdBindVertexBuffers(command[frameIndex].vkCommandBuffer, 0, 1, &vkSkelVertexBuffer, offsets);
+                    vkCmdBindIndexBuffer(command[frameIndex].vkCommandBuffer, skelIndexBuffer.vkBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+                    const uint32_t skelPipelineCount = static_cast<uint32_t>(skeletonMeshPipelines.size());
+                    LCA_ASSERT(skelPipelineCount == static_cast<uint32_t>(skeletonIndirectBuffers[frameIndex].size()), "Renderer", "recordFrame", "skeletonMeshPipelines and skeletonIndirectBuffers size mismatch.");
+
+                    for (uint32_t i = 0; i < skelPipelineCount; ++i) {
+                        SkeletonMeshPipeline& skelPipeline = skeletonMeshPipelines[i];
+
+                        VkDescriptorSet descriptorSet = skelPipeline.getVkDescriptorSet(frameIndex);
+                        vkCmdBindPipeline(
+                            command[frameIndex].vkCommandBuffer,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            skelPipeline.getVkPipeline()
+                        );
+                        vkCmdBindDescriptorSets(
+                            command[frameIndex].vkCommandBuffer,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            skelPipeline.getVkPipelineLayout(),
+                            0,
+                            1,
+                            &descriptorSet,
+                            0,
+                            nullptr
+                        );
+
+                        const Buffer& skelIndirectBuffer = skeletonIndirectBuffers[frameIndex][i];
+                        const VkDeviceSize skelDrawCountOffset = static_cast<VkDeviceSize>(i) * sizeof(uint32_t);
+                        vkCmdDrawIndexedIndirectCount(
+                            command[frameIndex].vkCommandBuffer,
+                            skelIndirectBuffer.vkBuffer,
+                            0,
+                            skeletonDrawCounts[frameIndex].vkBuffer,
+                            skelDrawCountOffset,
+                            skelIndirectBuffer.numberElements,
+                            sizeof(VkDrawIndexedIndirectCommand)
+                        );
+                    }
+                }
+
                 vkCmdEndRendering(command[frameIndex].vkCommandBuffer);
 
                 // Transition the swapchain image from COLOR_ATTACHMENT_OPTIMAL to PRESENT_SRC_KHR for presentation
@@ -584,6 +777,86 @@ namespace Lca{
         uint32_t Renderer::getMeshPipelineId(const std::string& name) const {
             auto it = meshPipelineMap.find(name);
             LCA_ASSERT(it != meshPipelineMap.end(), "Renderer", "getMeshPipelineId", "Mesh pipeline name not found.")
+            return it->second;
+        }
+
+        // ── Skeleton mesh instances ────────────────────────────
+
+        uint32_t Renderer::addSkeletonMeshInstance(const SkeletonMeshInstance& instance){
+            return skeletonMeshInstances.add(instance);
+        }
+
+        void Renderer::updateSkeletonMeshInstance(uint32_t id, const SkeletonMeshInstance& instance){
+            skeletonMeshInstances.update(id, instance);
+        }
+
+        void Renderer::removeSkeletonMeshInstance(uint32_t id){
+            skeletonMeshInstances.remove(id);
+        }
+
+        // ── Skeleton instances (bone matrices) ─────────────────
+
+        uint32_t Renderer::addSkeletonInstance(){
+            uint32_t id;
+            if(!freeSkeletonInstanceSlots.empty()){
+                id = freeSkeletonInstanceSlots.back();
+                freeSkeletonInstanceSlots.pop_back();
+            } else {
+                LCA_ASSERT(skeletonInstanceCount < MAX_SKELETON_INSTANCES, "Renderer", "addSkeletonInstance", "Exceeded MAX_SKELETON_INSTANCES capacity.")
+                id = skeletonInstanceCount++;
+            }
+            return id;
+        }
+
+        void Renderer::updateSkeletonInstance(uint32_t frameIndex, uint32_t id, const SkeletonInstance& instance){
+            LCA_ASSERT(id < MAX_SKELETON_INSTANCES, "Renderer", "updateSkeletonInstance", "Invalid skeleton instance ID.")
+            memcpy(
+                static_cast<char*>(skeletonInstancesGPU[frameIndex].interface.pMemory) + id * sizeof(SkeletonInstance),
+                &instance,
+                sizeof(SkeletonInstance)
+            );
+            dirtySkeletonInstanceIndices_[frameIndex].push_back(id);
+        }
+
+        void Renderer::removeSkeletonInstance(uint32_t id){
+            LCA_ASSERT(id < MAX_SKELETON_INSTANCES, "Renderer", "removeSkeletonInstance", "Invalid skeleton instance ID.")
+            freeSkeletonInstanceSlots.push_back(id);
+        }
+
+        // ── Skeleton mesh pipelines ────────────────────────────
+
+        uint32_t Renderer::addSkeletonMeshPipeline(const std::string& name, SkeletonMeshPipeline&& pipeline, uint32_t maxObjects){
+            LCA_ASSERT(skeletonMeshPipelineMap.find(name) == skeletonMeshPipelineMap.end(), "Renderer", "addSkeletonMeshPipeline", "Skeleton mesh pipeline name already exists.")
+            LCA_ASSERT(skeletonMeshPipelines.size() < MAX_SHADERS, "Renderer", "addSkeletonMeshPipeline", "Exceeded MAX_SHADERS capacity.")
+            LCA_ASSERT(maxObjects > 0, "Renderer", "addSkeletonMeshPipeline", "maxObjects must be greater than 0.")
+
+            skeletonMeshPipelines.push_back(std::move(pipeline));
+            const uint32_t id = static_cast<uint32_t>(skeletonMeshPipelines.size() - 1);
+
+            skeletonMeshPipelines.back().build();
+            skeletonMeshPipelineMap[name] = id;
+
+            for(uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                Buffer buffer = createBuffer(maxObjects, sizeof(VkDrawIndexedIndirectCommand), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+                skeletonIndirectBuffers[i].push_back(buffer);
+            }
+
+            auto* capacities = static_cast<uint32_t*>(skeletonShaderCapacities.interface.pMemory);
+            capacities[id] = maxObjects;
+
+            beginSingleCommand(singleCommand);
+            skeletonShaderCapacities.recordSync(singleCommand);
+            endSingleCommand(singleCommand);
+            submitSingleCommand(singleCommand);
+
+            skeletonCullPipeline->updateDescriptorSetWrites();
+
+            return id;
+        }
+
+        uint32_t Renderer::getSkeletonMeshPipelineId(const std::string& name) const {
+            auto it = skeletonMeshPipelineMap.find(name);
+            LCA_ASSERT(it != skeletonMeshPipelineMap.end(), "Renderer", "getSkeletonMeshPipelineId", "Skeleton mesh pipeline name not found.")
             return it->second;
         }
 

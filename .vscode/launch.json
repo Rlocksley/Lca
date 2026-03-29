@@ -3,16 +3,16 @@
   "configurations": [
   
     {
-      "name": "Release lca_example6",
+      "name": "Release lca_example7",
       "type": "cppvsdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/build/examples/example6/Release/lca_example6.exe",
+      "program": "${workspaceFolder}/build/examples/example7/Release/lca_example7.exe",
       "args": [],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
       "environment": [],
       "console": "integratedTerminal",
-      "preLaunchTask": "build lca_example6 (Release)"
+      "preLaunchTask": "build lca_example7 (Release)"
     },
   ]
 }

@@ -9,9 +9,12 @@ TransformID.hpp
 TransformID.cpp
 Mesh.hpp
 Mesh.cpp
+SkeletonMesh.hpp
 FlyingCamera.hpp
 FlyingCamera.cpp
 Light.hpp
+AnimationStateMachine.hpp
+AnimationStateMachine.cpp
 )
 
 target_include_directories(lca_component PUBLIC ../core ../flecs)

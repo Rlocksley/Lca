@@ -58,10 +58,14 @@ GraphicsPipeline.hpp
 GraphicsPipeline.cpp
 MeshPipeline.hpp
 MeshPipeline.cpp
+SkeletonMeshPipeline.hpp
+SkeletonMeshPipeline.cpp
 ComputePipeline.hpp
 ComputePipeline.cpp
 UberCullPipeline.hpp
 UberCullPipeline.cpp
+SkeletonCullPipeline.hpp
+SkeletonCullPipeline.cpp
 AssetManager.hpp
 AssetManager.cpp
 Helpers.hpp
@@ -73,6 +77,8 @@ GraphicsPipeline.hpp
 GraphicsPipeline.cpp
 DepthPipeline.hpp
 DepthPipeline.cpp
+SkeletonDepthPipeline.hpp
+SkeletonDepthPipeline.cpp
 LightCullPipeline.hpp
 LightCullPipeline.cpp
 )
