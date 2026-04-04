@@ -14,7 +14,7 @@ target_link_libraries(lca_app PUBLIC
     glm::glm        # The imported target for GLM
     glfw            # The imported target for GLFW
     flecs::flecs
-#    Jolt::Jolt
+    Jolt::Jolt
     lca_core
     lca_component
 )

@@ -366,9 +366,10 @@ namespace Lca {
             // System: runs on parent entities that have AnimationStateMachine + SkeletonInstanceID.
             // Evaluates the state machine, computes bone matrices, and writes them
             // to the single SkeletonInstance owned by this parent.
-            world.system<Component::AnimationStateMachine, const Component::SkeletonInstanceID>()
+            world.system<Component::AnimationStateMachine, const Component::SkeletonInstanceID>("AnimationStateMachineUpdate")
+                .multi_threaded()
                 .each([](flecs::entity e, Component::AnimationStateMachine& asm_, const Component::SkeletonInstanceID& skelInstID) {
-                    if (skelInstID.id == UINT32_MAX) return;
+                    //if (skelInstID.id == UINT32_MAX) return;
 
                     // Update the animation state machine and get node poses
                     std::vector<Core::NodePose> nodePoses = asm_.update(Time::deltaTime);

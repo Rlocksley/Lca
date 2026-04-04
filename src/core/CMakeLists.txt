@@ -81,6 +81,8 @@ SkeletonDepthPipeline.hpp
 SkeletonDepthPipeline.cpp
 LightCullPipeline.hpp
 LightCullPipeline.cpp
+Physics.hpp
+Physics.cpp
 )
 
 
@@ -90,4 +92,5 @@ target_link_libraries(lca_core PUBLIC
     glm::glm        # The imported target for GLM
     glfw            # The imported target for GLFW (note: glfw, not glfw3)
     assimp::assimp  # The imported target for Assimp
+    Jolt::Jolt      # The imported target for Jolt
 )

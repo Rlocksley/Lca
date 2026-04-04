@@ -13,6 +13,7 @@
 #include "SkeletonDepthPipeline.hpp"
 #include "SkeletonCullPipeline.hpp"
 #include "LightCullPipeline.hpp"
+#include <mutex>
 
 namespace Lca {
     namespace Core {
@@ -216,6 +217,7 @@ namespace Lca {
             // ── Skeleton instance data (bone matrices) ─────────────
             std::array<DualBuffer, MAX_FRAMES_IN_FLIGHT> skeletonInstancesGPU;
             std::array<std::vector<uint32_t>, MAX_FRAMES_IN_FLIGHT> dirtySkeletonInstanceIndices_;
+            std::array<std::mutex, MAX_FRAMES_IN_FLIGHT> skeletonInstanceMutexes;
             std::vector<uint32_t> freeSkeletonInstanceSlots;
             uint32_t skeletonInstanceCount{0};
 

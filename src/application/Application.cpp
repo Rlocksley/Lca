@@ -15,6 +15,12 @@ namespace Lca {
 Application::Application(const std::string& title, int width, int height) 
     : isLoading(false), loadingComplete(false), pendingLevel(nullptr), currentLevel(nullptr),
       streamingWorkerRunning(false) {
+    // Enable flecs multi-threading for systems. Reserve one core for main/render.
+    {
+        unsigned int hc = std::thread::hardware_concurrency();
+        unsigned int threads = (hc <= 1) ? 1u : (hc - 1);
+        world.set_threads(static_cast<int>(threads));
+    }
     Core::windowTitle = title;
     Core::windowWidth = width;
     Core::windowHeight = height;

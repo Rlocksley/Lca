@@ -810,11 +810,13 @@ namespace Lca{
 
         void Renderer::updateSkeletonInstance(uint32_t frameIndex, uint32_t id, const SkeletonInstance& instance){
             LCA_ASSERT(id < MAX_SKELETON_INSTANCES, "Renderer", "updateSkeletonInstance", "Invalid skeleton instance ID.")
+            // Protect writes to per-frame dirty index vector when system runs multi-threaded.
             memcpy(
                 static_cast<char*>(skeletonInstancesGPU[frameIndex].interface.pMemory) + id * sizeof(SkeletonInstance),
                 &instance,
                 sizeof(SkeletonInstance)
             );
+            std::lock_guard<std::mutex> lock(skeletonInstanceMutexes[frameIndex]);
             dirtySkeletonInstanceIndices_[frameIndex].push_back(id);
         }
 

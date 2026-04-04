@@ -46,7 +46,7 @@ namespace Lca{
         std::vector<uint32_t> indices;
 
         public:
-        Sphere(int radius, int latitudes, int longitudes, glm::vec3 offset = glm::vec3(0,0,0), glm::vec4 color = glm::vec4(1,1,1,1));
+        Sphere(int radius, int latitudes, int longitudes, glm::vec3 offset = glm::vec3(0,0,0), glm::vec4 color = glm::vec4(1,1,1,1), bool invertNormals = false);
         private:
         
         void GenerateSphereSmooth(int radius, int latitudes, int longitudes, glm::vec3 offset, glm::vec4 color);

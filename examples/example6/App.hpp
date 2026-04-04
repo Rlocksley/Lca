@@ -3,18 +3,26 @@
 #include "Application.hpp"
 #include "Light.hpp"
 #include "Shape.hpp"
+#include "CharacterCamera.hpp"
 #include "Lev.hpp"
 #include "Input.hpp"
 #include <iostream>
+#include "PhysicsBody.hpp"
+#include "PhysicsModule.hpp"
+#include "RigidBody.hpp"
+#include "BoxCollider.hpp"
+#include "CharacterCapsule.hpp"
 
 // ──────────────────────────────────────────────────────────────
 // Example 6 — Level Streaming (10x10 City Grid, proximity-based)
+//            + Physics (floor, houses, cars with BoxCollider)
+//            + Wizard player character (same as example8)
 //
 // 100 streaming zones tiled in a 10x10 grid.  An ECS system
-// checks the FlyingCamera position every frame and streams in
+// checks the CharacterCamera position every frame and streams in
 // zones within range, streaming out zones that are too far away.
 //
-// Fly around with WASD + mouse — zones load/unload automatically.
+// WASD to move, Shift to run, Space to jump, Left-click to attack.
 // Press 0 to stream out ALL zones at once.
 // ──────────────────────────────────────────────────────────────
 
@@ -28,13 +36,21 @@ protected:
     void onInit() override {
         using namespace Lca;
 
-        // Pipeline
+        // ── Regular PBR pipeline ──────────────────────────────
         Core::GraphicsPipelineConfig pipelineConfig{};
         pipelineConfig.vertexShader   = "shader/mesh_pbr.vert.spv";
         pipelineConfig.fragmentShader = "shader/mesh_pbr.frag.spv";
         Core::MeshPipeline meshPipeline(pipelineConfig);
         Core::GetRenderer().addMeshPipeline("basic", std::move(meshPipeline), 16384);
 
+        // ── Skeleton PBR pipeline ─────────────────────────────
+        Core::GraphicsPipelineConfig skelPipelineConfig{};
+        skelPipelineConfig.vertexShader   = "shader/skeleton_mesh_pbr.vert.spv";
+        skelPipelineConfig.fragmentShader = "shader/mesh_pbr.frag.spv";
+        Core::SkeletonMeshPipeline skelPipeline(skelPipelineConfig);
+        Core::GetRenderer().addSkeletonMeshPipeline("skeletonPBR", std::move(skelPipeline), 2*4096);
+
+        
         // Loading-screen cube
         Shape::Cube _cube(glm::vec3(1.0f), glm::vec3(0.0f), glm::vec4(1.0f));
         Core::GetAssetManager().addMesh("cube", _cube.getVertices(), _cube.getIndices());
@@ -50,10 +66,19 @@ protected:
         world.import<Module::Persistent>();
         world.import<Module::Hidden>();
         world.import<Module::Transform>();
+        world.import<Module::MeshTransform>();
         world.import<Module::TransformID>();
         world.import<Module::Mesh>();
+        world.import<Module::SkeletonMesh>();
+        world.import<Module::AnimationStateMachine>();
         world.import<Module::Light>();
         world.import<Module::FlyingCamera>();
+        world.import<Module::CharacterCamera>();
+        world.import<Module::PhysicsModule>();
+        world.import<Module::PhysicsBodyModule>();
+        world.import<Module::BoxColliderModule>();
+        world.import<Module::RigidBodyModule>();
+        world.import<Module::CharacterCapsuleModule>();
 
         // Load the city level (shows loading screen, then sets up
         // the 10x10 streaming zone grid and proximity system)
@@ -86,6 +111,12 @@ protected:
             Core::GetRenderer().getMeshPipelineId("basic")
         });
 
+        world.entity("LoadingSun")
+            .set<Component::DirectionalLight>({
+                .color     = glm::vec3(1.0f, 0.98f, 0.9f),
+                .intensity = 2.0f,
+            });
+
         world.system<Component::Transform>("Rotate Loading Cube")
             .without<Component::Hidden>()
             .each([](flecs::entity, Component::Transform& t) {
@@ -95,7 +126,7 @@ protected:
     }
 
     void onLevelReady() override {
-        std::cout << "[Example6] Level loaded. Proximity streaming active.\n";
+        std::cout << "[Example6] Level loaded. WASD to move, Shift to run, Space to jump, Left-click to attack. Proximity streaming active.\n";
     }
 
     void onStreamingLevelLoaded(const std::string& levelId) override {

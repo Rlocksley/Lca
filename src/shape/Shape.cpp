@@ -47,8 +47,17 @@ namespace Lca{
             };
         }
 
-    Sphere::Sphere(int radius, int latitudes, int longitudes, glm::vec3 offset, glm::vec4 color){
+    Sphere::Sphere(int radius, int latitudes, int longitudes, glm::vec3 offset, glm::vec4 color, bool invertNormals){
         GenerateSphereSmooth(radius, latitudes, longitudes, offset, color);
+        if (invertNormals) {
+            for (auto& vert : vertices)
+                vert.normal = -vert.normal;
+            for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+                uint32_t tmp = indices[i + 1];
+                indices[i + 1] = indices[i + 2];
+                indices[i + 2] = tmp;
+            }
+        }
     }
 
     

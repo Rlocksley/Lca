@@ -56,7 +56,7 @@ find_package(glm REQUIRED)
 
 find_package(flecs REQUIRED)
 
-#find_package(Jolt REQUIRED)
+find_package(Jolt REQUIRED)
 
 find_package(assimp REQUIRED)
 
@@ -78,7 +78,7 @@ add_subdirectory(./examples/example4)
 add_subdirectory(./examples/example5)
 add_subdirectory(./examples/example6)
 add_subdirectory(./examples/example7)
-#add_subdirectory(./examples/example8)
+add_subdirectory(./examples/example8)
 #add_subdirectory(./examples/example9)
 #add_subdirectory(./examples/example10)
 #add_subdirectory(./examples/example11)

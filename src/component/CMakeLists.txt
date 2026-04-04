@@ -7,6 +7,7 @@ Transform.hpp
 Transform.cpp
 TransformID.hpp
 TransformID.cpp
+MeshTransform.hpp
 Mesh.hpp
 Mesh.cpp
 SkeletonMesh.hpp
@@ -15,6 +16,11 @@ FlyingCamera.cpp
 Light.hpp
 AnimationStateMachine.hpp
 AnimationStateMachine.cpp
+BoxCollider.hpp
+CharacterCapsule.hpp
+PhysicsModule.hpp
+RigidBody.hpp
+Sensor.hpp
 )
 
 target_include_directories(lca_component PUBLIC ../core ../flecs)

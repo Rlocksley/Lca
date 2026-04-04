@@ -19,6 +19,25 @@
 
 using namespace Lca;
 
+struct MultiThreaded1{
+    uint32_t buffer;
+};
+
+struct MultiThreaded2{
+    uint32_t buffer;
+};
+
+struct MultiThreaded3{
+    uint32_t buffer;
+};
+
+struct MultiThreaded4{
+    uint32_t buffer;
+};
+
+struct MultiThreaded5{
+    uint32_t buffer;
+};
 // ──────────────────────────────────────────────────────────────
 // Primitive CharacterCapsule — no physics engine, just moves
 // the owning Transform directly via keyboard input.
@@ -139,6 +158,14 @@ public:
                 e.set(Component::Transform{glm::vec3(i * width, 0.0f, j * height), 0.0f, glm::vec3(0,1,0), glm::vec3(1.0f)});
                 e.add<Component::TransformID>();
                 e.add<Component::SkeletonInstanceID>();
+
+                // switch(j % 5) {
+                //     case 0: e.set(MultiThreaded1{}); break;
+                //     case 1: e.set(MultiThreaded2{}); break;
+                //     case 2: e.set(MultiThreaded3{}); break;
+                //     case 3: e.set(MultiThreaded4{}); break;
+                //     case 4: e.set(MultiThreaded5{}); break;
+                // }
 
                 // ── Skeleton mesh children (one per sub-mesh in the model) ──
                 for (size_t k = 0; k < model.size(); ++k) {
