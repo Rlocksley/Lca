@@ -164,5 +164,23 @@ namespace Lca{
             vertices.push_back(vertex);
         }
     }
+
+    // ── Square ────────────────────────────────────────────────────────────────
+    // Flat XY-plane quad (facing +Z), used as billboard particle geometry.
+    // Vertices span [-halfSize, +halfSize] in X and Y.
+    Square::Square(float halfSize, glm::vec3 offset, glm::vec4 color) {
+        float h = halfSize;
+        vertices = {
+            // bottom-left
+            {{-h + offset.x, -h + offset.y, offset.z}, {0.0f, 0.0f, 1.0f}, color, {0.0f, 0.0f}},
+            // bottom-right
+            {{ h + offset.x, -h + offset.y, offset.z}, {0.0f, 0.0f, 1.0f}, color, {1.0f, 0.0f}},
+            // top-right
+            {{ h + offset.x,  h + offset.y, offset.z}, {0.0f, 0.0f, 1.0f}, color, {1.0f, 1.0f}},
+            // top-left
+            {{-h + offset.x,  h + offset.y, offset.z}, {0.0f, 0.0f, 1.0f}, color, {0.0f, 1.0f}},
+        };
+    }
+
     }
 }

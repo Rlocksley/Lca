@@ -11,6 +11,7 @@ MeshTransform.hpp
 Mesh.hpp
 Mesh.cpp
 SkeletonMesh.hpp
+ParticleSystem.hpp
 FlyingCamera.hpp
 FlyingCamera.cpp
 Light.hpp

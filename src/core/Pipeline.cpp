@@ -96,6 +96,15 @@ namespace Lca {
             descriptorResources[descriptorSetIndex].push_back(resource);
             return *this;
         }
+        Pipeline& Pipeline::addPushConstantRange(VkShaderStageFlags stageFlags, uint32_t offset, uint32_t size) {
+            VkPushConstantRange range{};
+            range.stageFlags = stageFlags;
+            range.offset = offset;
+            range.size = size;
+            pushConstantRanges.push_back(range);
+            return *this;
+        }
+
         Pipeline& Pipeline::addTextureArrayInternal(const uint32_t descriptorSetIndex, const uint32_t binding, const Texture* textures, uint32_t textureCount, const VkShaderStageFlags stageFlags) {
             LCA_ASSERT(textureCount > 0, "Pipeline", "addTextureArray", "Texture array must contain at least one texture.")
             DescriptorRessource resource{};
@@ -189,8 +198,8 @@ namespace Lca {
             pipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
             pipelineLayoutCreateInfo.setLayoutCount = 1;
             pipelineLayoutCreateInfo.pSetLayouts = &descriptorSetLayout;
-            pipelineLayoutCreateInfo.pushConstantRangeCount = 0;
-            pipelineLayoutCreateInfo.pPushConstantRanges = nullptr;
+            pipelineLayoutCreateInfo.pushConstantRangeCount = static_cast<uint32_t>(pushConstantRanges.size());
+            pipelineLayoutCreateInfo.pPushConstantRanges = pushConstantRanges.empty() ? nullptr : pushConstantRanges.data();
 
             LCA_CHECK_VULKAN(
                 vkCreatePipelineLayout(vkDevice, &pipelineLayoutCreateInfo, nullptr, &pipelineLayout),

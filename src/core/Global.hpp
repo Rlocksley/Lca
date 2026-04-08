@@ -1,7 +1,7 @@
 #pragma once
 
 
-//#define LCA_DEBUG
+#define LCA_DEBUG
 
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>

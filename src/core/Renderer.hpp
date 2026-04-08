@@ -8,6 +8,9 @@
 #include "Pipeline.hpp"
 #include "MeshPipeline.hpp"
 #include "SkeletonMeshPipeline.hpp"
+#include "ParticleSystemPipeline.hpp"
+#include "ParticleSystemCompPipeline.hpp"
+#include "ParticleCullPipeline.hpp"
 #include "UberCullPipeline.hpp"
 #include "DepthPipeline.hpp"
 #include "SkeletonDepthPipeline.hpp"
@@ -29,6 +32,18 @@ namespace Lca {
         const inline uint32_t TILE_WIDTH = 16;
         const inline uint32_t TILE_HEIGHT = 16;
         const inline uint32_t MAX_LIGHTS_PER_TILE = 256;
+        const inline uint32_t MAX_PARTICLE_SYSTEMS            = 1024;
+        const inline uint32_t MAX_PARTICLES                  = 524288; // 512K particles
+        const inline uint32_t MAX_PARTICLE_COMP_PIPELINES    = 64;
+        // Each comp pipeline has its own strided region in the dispatch table.
+        // Worst case: all MAX_PARTICLES assigned to a single pipeline.
+        // sim workgroup size = 256 → max groups per pipeline = 524288 / 256 = 2048.
+        const inline uint32_t MAX_DISPATCH_PER_PIPELINE      = MAX_PARTICLES / 256u; // 2048
+        // Total dispatch table size = one 2048-entry region per comp pipeline.
+        const inline uint32_t MAX_PARTICLE_DISPATCH_ENTRIES  = MAX_PARTICLE_COMP_PIPELINES * MAX_DISPATCH_PER_PIPELINE; // 131072
+        // Maximum number of distinct particle graphics pipelines.
+        // Each pipeline gets its own per-slot indirect buffer written by the cull shader.
+        const inline uint32_t MAX_PARTICLE_GFX_PIPELINES     = 64;
 
         struct Camera{
             glm::vec4 frustumPlanes[6];
@@ -85,6 +100,61 @@ namespace Lca {
         struct SkeletonInstance {
             glm::mat4 boneWithInvBindMatrices[MAX_BONES_PER_SKELETON];
             glm::mat4 boneTransform[MAX_BONES_PER_SKELETON];
+        };
+
+        // ── Particle system data structures ───────────────────────────────────
+
+        // Per-particle state in the GPU storage buffer.
+        // position.xyz = system-local position, position.w = remaining lifetime (seconds).
+        // velocity.w   = max lifetime (seconds, already tracked in the struct).
+        // params.x     = particle size scale.
+        // params.y     = systemIndex stored as uint bits (uintBitsToFloat / floatBitsToUint).
+        struct Particle {
+            glm::vec4 position;  // xyz = local pos, w = remaining lifetime
+            glm::vec4 velocity;  // xyz = velocity,  w = max lifetime
+            glm::vec4 color;     // rgba tint
+            glm::vec4 params;    // x = size, y = systemIndex bits, zw = user params
+        };
+
+        // Per-particle-system GPU record, synced via DualBuffer (CPU add/remove/update).
+        // The `active` field is additionally written every frame by the ParticleCullPipeline.
+        // `indexCount`, `firstIndex`, `vertexOffset` are filled CPU-side at addParticleSystem
+        // time so the cull shader can build VkDrawIndexedIndirectCommand[slot] without a
+        // separate mesh-info SSBO binding.
+        struct ParticleSystemInstance {
+            // ── Identifiers ──────────────────────────────────────────
+            uint32_t  transformID;         // parent ModelMatrix index
+            uint32_t  computeID;           // ParticleSystemCompPipeline variant
+            uint32_t  graphicsID;          // ParticleSystemPipeline variant
+            uint32_t  meshID;              // shape mesh
+            uint32_t  materialID;
+            uint32_t  particleOffset;      // first particle in storage buffer
+            uint32_t  particleCount;
+            uint32_t  active;              // 0 = culled, 1 = visible (written by cull shader)
+            // ── Draw command data (CPU-written, read by cull shader) ─
+            uint32_t  indexCount;
+            uint32_t  firstIndex;
+            int32_t   vertexOffset;
+            float     boundingSphereRadius;// world-space sphere radius for frustum culling
+            // ── Local particle-system offset from parent transform ───
+            glm::mat4 localOffset;
+        };
+
+        // Per-workgroup record written by the cull shader into particleDispatchTableBuffer.
+        // The sim shader reads dispatchTable[gl_WorkGroupID.x] to find its system
+        // and particle range — so no push constant is needed per dispatch.
+        struct ParticleDispatchEntry {
+            uint32_t particleBase; // = particleOffset + workgroupLocalIdx * 256 (absolute)
+            uint32_t systemSlot;  // index into ParticleSystemInstances[]
+            uint32_t _pad[2];
+        };
+
+        // deltaTime-only uniform for the particle simulation compute shader.
+        // Remaining lifetime and max lifetime are stored per-particle in Particle.position.w
+        // and Particle.velocity.w respectively, so no totalTime is needed here.
+        struct ParticleDeltaTimeUniform {
+            float deltaTime;
+            float _pad[3];
         };
 
         class Renderer{
@@ -170,7 +240,48 @@ namespace Lca {
             // Skeleton depth pre-pass buffers
             std::array<Buffer, MAX_FRAMES_IN_FLIGHT> skeletonDepthPrePassBuffer;
             std::array<Buffer, MAX_FRAMES_IN_FLIGHT> skeletonDepthPrePassCountBuffer;
-          
+
+            // ── Particle system management ─────────────────────────
+            // addParticleSystem allocates a contiguous particle range in the
+            // GPU storage buffer (same first-fit strategy as AssetManager meshes),
+            // writes one VkDrawIndexedIndirectCommand per system into the graphics
+            // pipeline's indirect buffer, and returns the slot ID used to update or
+            // remove the system later.
+            uint32_t addParticleSystem(const ParticleSystemInstance& instance);
+            void     updateParticleSystem(uint32_t id, const ParticleSystemInstance& instance);
+            void     removeParticleSystem(uint32_t id);
+            void     copyParticleSystemInstancesToGPU(uint32_t frameIndex) {
+                dirtyParticleSystemIndices[frameIndex] = particleSystemSlots.copyTo(particleSystemInstancesGPU[frameIndex].interface);
+            }
+            // Updates the deltaTime uniform that the sim shader reads each frame.
+            // Call once per frame before recordFrame (typically from the ECS particle system).
+            void     updateParticleDeltaTime(uint32_t frameIndex, float deltaTime);
+
+            // ── Particle compute pipelines ─────────────────────────
+            uint32_t addParticleSystemCompPipeline(const std::string& name, ParticleSystemCompPipeline&& pipeline);
+            uint32_t getParticleSystemCompId(const std::string& name) const;
+
+            // ── Particle graphics pipelines ────────────────────────
+            uint32_t addParticleSystemPipeline(const std::string& name, ParticleSystemPipeline&& pipeline);
+            uint32_t getParticleSystemPipelineId(const std::string& name) const;
+
+            // ── Particle buffer accessors (used by pipeline constructors) ──
+            const Buffer getParticleSystemInstanceBuffer(uint32_t frameIndex) const { return particleSystemInstancesGPU[frameIndex].buffer; }
+            const Buffer getParticleStorageBuffer()          const { return particleStorageBuffer; }
+            const Buffer getParticleDeltaTimeBuffer(uint32_t frameIndex) const { return particleDeltaTimeBuffer[frameIndex].buffer; }
+            // Per-pipeline indirect buffers written every frame by the particle cull pipeline.
+            // particleGfxIndirectBuffers[graphicsID][slot] = VkDrawIndexedIndirectCommand;
+            //   firstInstance = particleOffset, instanceCount = particleCount (0 = culled).
+            const std::vector<Buffer>& getParticleGfxIndirectBuffers() const { return particleGfxIndirectBuffers; }
+            const Buffer getParticleGfxDrawCountBuffer(uint32_t frameIndex) const { return particleGfxDrawCounts[frameIndex]; }
+            // particleCompIndirectBuffer[K] = VkDispatchIndirectCommand for comp pipeline K.
+            // Reset to {0,1,1} each frame by CPU (vkCmdUpdateBuffer); cull atomically
+            // accumulates workgroup counts into .x.  One vkCmdDispatchIndirect per pipeline.
+            const Buffer getParticleCompIndirectBuffer()   const { return particleCompIndirectBuffer; }
+            // particleDispatchTableBuffer[entry] = { particleBase, systemSlot }.
+            // Written by cull shader; read by sim shader via gl_WorkGroupID.x.
+            const Buffer getParticleDispatchTableBuffer()  const { return particleDispatchTableBuffer; }
+        
         private:
             
             SlotBuffer<ObjectInstance, MAX_OBJECTS> objectInstances;
@@ -230,6 +341,63 @@ namespace Lca {
             DualBuffer skeletonShaderCapacities;
             std::unique_ptr<SkeletonDepthPipeline> skeletonDepthPipeline;
             std::unique_ptr<SkeletonCullPipeline> skeletonCullPipeline;
+
+            // ── Particle storage buffer ────────────────────────────
+            // One large device-local buffer shared by all particle systems.
+            // Ranges are allocated with a first-fit free-list, identical to
+            // the vertex/index buffer strategy in AssetManager.
+            struct ParticleBufferRange { uint32_t offset; uint32_t size; };
+            Buffer particleStorageBuffer;
+            uint32_t currentParticleTop{0};
+            std::vector<ParticleBufferRange> particleFreeRanges;
+            uint32_t allocateParticleRange(uint32_t count);
+            void     freeParticleRange(uint32_t offset, uint32_t count);
+
+            // ── Particle system instance data ──────────────────────
+            SlotBuffer<ParticleSystemInstance, MAX_PARTICLE_SYSTEMS> particleSystemSlots;
+            std::array<DualBuffer, MAX_FRAMES_IN_FLIGHT> particleSystemInstancesGPU;
+            std::array<std::vector<uint32_t>, MAX_FRAMES_IN_FLIGHT> dirtyParticleSystemIndices;
+
+            // ── Per-frame deltaTime uniform ────────────────────────
+            std::array<DualBuffer, MAX_FRAMES_IN_FLIGHT> particleDeltaTimeBuffer;
+
+            // particleGfxIndirectBuffers[graphicsID] = Buffer of MAX_PARTICLE_SYSTEMS
+            //   VkDrawIndexedIndirectCommands indexed by global particle system slot.
+            //   firstInstance = particleOffset so gl_InstanceIndex = absolute particle index.
+            //   Cull shader writes into the matching pipeline's buffer; all others stay 0
+            //   because each buffer is zeroed via vkCmdFillBuffer before the cull dispatch.
+            std::vector<Buffer> particleGfxIndirectBuffers;
+            // Per-frame draw count buffer: one uint32_t per registered gfx pipeline.
+            // Cleared to 0 each frame; cull shader atomically increments per visible system.
+            std::array<Buffer, MAX_FRAMES_IN_FLIGHT> particleGfxDrawCounts;
+            // particleCompIndirectBuffer[K] = VkDispatchIndirectCommand for comp pipeline K.
+            //   CPU resets to {0,1,1} each frame via vkCmdUpdateBuffer; cull shader
+            //   atomically accumulates x = total workgroup count for visible systems.
+            //   One vkCmdDispatchIndirect per pipeline reads this.
+            Buffer particleCompIndirectBuffer;
+            // particleDispatchTableBuffer[entry] = ParticleDispatchEntry.
+            //   Written by cull shader; maps global workgroup ID → (particleBase, systemSlot).
+            //   Allows the sim shader to find its system without a push constant.
+            Buffer particleDispatchTableBuffer;
+
+            // ── Particle graphics pipeline data ─────────────────────
+            std::vector<ParticleSystemPipeline> particlePipelines;
+            std::unordered_map<std::string, uint32_t> particlePipelineMap;
+            // Per gfx pipeline: ordered list of system slots (for draw calls)
+            std::vector<std::vector<uint32_t>> particleGfxSystems;
+
+            // ── Particle compute pipeline data ──────────────────────
+            std::vector<std::unique_ptr<ParticleSystemCompPipeline>> particleCompPipelines;
+            std::unordered_map<std::string, uint32_t> particleCompPipelineMap;
+            // Per comp pipeline: list of registered system slots
+            std::vector<std::vector<uint32_t>> particleCompSystems;
+
+            // ── Particle cull pipeline ──────────────────────────────
+            std::unique_ptr<ParticleCullPipeline> particleCullPipeline;
+
+            // Total number of particle system slots ever allocated (high-water mark
+            // into particleSystemInstances, used for cull dispatch sizing).
+            uint32_t particleSystemRegisteredCount{0};
 
             
             glm::mat4 createViewMatrix(const glm::vec3& cameraPosition, const glm::vec3& cameraDirection, const glm::vec3& upDirection);

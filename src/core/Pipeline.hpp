@@ -23,6 +23,7 @@ namespace Lca{
             Pipeline& addBufferArray(const uint32_t descriptorSetIndex, const uint32_t binding, const std::vector<Buffer>& buffers, const VkShaderStageFlags stageFlags);
             Pipeline& addBufferArray(const uint32_t descriptorSetIndex, const uint32_t binding, const std::vector<Buffer>& buffers, const uint32_t descriptorCount, const VkBuffer fallbackBuffer, const VkShaderStageFlags stageFlags);
             Pipeline& addTexture(const uint32_t descriptorSetIndex, const uint32_t binding, const Texture& texture, const VkShaderStageFlags stageFlags);
+            Pipeline& addPushConstantRange(VkShaderStageFlags stageFlags, uint32_t offset, uint32_t size);
 
             template<size_t N>
             Pipeline& addTextureArray(const uint32_t descriptorSetIndex, const uint32_t binding, const std::array<Texture, N>& textures, const VkShaderStageFlags stageFlags){
@@ -65,6 +66,8 @@ namespace Lca{
             void destroyOwnedVulkanObjects();
 
             std::array<std::vector<DescriptorRessource>, MAX_FRAMES_IN_FLIGHT> descriptorResources;
+
+            std::vector<VkPushConstantRange> pushConstantRanges;
 
             VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
             std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT> descriptorSets{}; // One descriptor set per frame in flight

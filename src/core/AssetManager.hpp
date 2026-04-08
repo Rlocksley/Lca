@@ -128,6 +128,16 @@ namespace Lca{
             Model loadModel(const std::string& name, const std::string& filePath);
             const Model& getModel(const std::string& name) const;
 
+            struct MeshInfo {
+                uint32_t indexCount;
+                uint32_t firstIndex;
+                uint32_t vertexCount;
+                int32_t  vertexOffset;
+                glm::vec4 boundingSphere; // xyz = local center, w = radius
+            };
+
+            MeshInfo getMeshInfo(uint32_t meshId) const;
+
             const Buffer getMaterialBuffer() const { return materials.buffer; }
             const std::array<Texture, MAX_TEXTURES>& getTextures() const { return textures; }
             const Buffer getMeshInfoBuffer() const { return meshInfos.buffer; }
@@ -158,14 +168,6 @@ namespace Lca{
 
             static constexpr uint32_t MAX_SKELETONS = 1024;
             static constexpr uint32_t MAX_NODES_PER_SKELETON = 256;
-
-            struct MeshInfo{
-                uint32_t indexCount;
-                uint32_t firstIndex;
-                uint32_t vertexCount;
-                int32_t vertexOffset;
-                glm::vec4 boundingSphere; // xyz = local center, w = radius
-            };
 
             struct BufferRange {
                 uint32_t offset;

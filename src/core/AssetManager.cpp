@@ -29,6 +29,15 @@ namespace Lca{
             return globalAssetManager;
         }
 
+        AssetManager::MeshInfo AssetManager::getMeshInfo(uint32_t meshId) const {
+            LCA_ASSERT(meshId < meshInfos.size, "AssetManager", "getMeshInfo", "Invalid mesh ID.");
+            MeshInfo info{};
+            std::memcpy(&info,
+                static_cast<const char*>(meshInfos.interface.pMemory) + meshId * sizeof(MeshInfo),
+                sizeof(MeshInfo));
+            return info;
+        }
+
         void AssetManager::recordSync(const Command& command) {
             meshInfos.recordSync(command);
             skeletonMeshInfos.recordSync(command);

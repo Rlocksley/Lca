@@ -66,6 +66,12 @@ UberCullPipeline.hpp
 UberCullPipeline.cpp
 SkeletonCullPipeline.hpp
 SkeletonCullPipeline.cpp
+ParticleSystemPipeline.hpp
+ParticleSystemPipeline.cpp
+ParticleSystemCompPipeline.hpp
+ParticleSystemCompPipeline.cpp
+ParticleCullPipeline.hpp
+ParticleCullPipeline.cpp
 AssetManager.hpp
 AssetManager.cpp
 Helpers.hpp

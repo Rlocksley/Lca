@@ -1,0 +1,186 @@
+#version 450
+#extension GL_EXT_nonuniform_qualifier : enable
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// ── Constants (must match Renderer.hpp) ──────────────────────────────────────
+const uint SIM_WORKGROUP_SIZE        = 256u;  // particle_sim local_size_x
+const uint MAX_DISPATCH_PER_PIPELINE = 2048u; // MAX_PARTICLES / SIM_WORKGROUP_SIZE
+
+// ── Push constant ─────────────────────────────────────────────────────────────
+layout(push_constant) uniform PC {
+    uint systemCount; // particleSystemRegisteredCount
+    uint _pad;
+} pc;
+
+// ── Binding 0: Camera ─────────────────────────────────────────────────────────
+layout(set = 0, binding = 0) uniform CameraUBO {
+    vec4  frustumPlanes[6]; // xyz = inward normal, w = plane offset (dot(n,p)+w >= 0 = inside)
+    mat4  projection;
+    mat4  view;
+    mat4  viewProjection;
+    mat4  inverseProjection;
+    vec4  camPos;
+    vec4  camDir;
+    vec2  screenSize;
+    float nearClip;
+    float farClip;
+} camera;
+
+// ── Binding 1: Particle system instances ──────────────────────────────────────
+struct ParticleSystemInstance {
+    uint  transformID;
+    uint  computeID;
+    uint  graphicsID;
+    uint  meshID;
+    uint  materialID;
+    uint  particleOffset;      // first particle index in the storage buffer
+    uint  particleCount;
+    uint  isActive;             // written by this shader each frame
+    uint  indexCount;          // mesh draw data (CPU-written at addParticleSystem)
+    uint  firstIndex;
+    int   vertexOffset;
+    float boundingSphereRadius;
+    mat4  localOffset;         // local-to-parent transform of the particle emitter
+};
+
+layout(set = 0, binding = 1) buffer ParticleSystemInstances {
+    ParticleSystemInstance instances[];
+};
+
+// ── Binding 2: Model matrices ──────────────────────────────────────────────────
+struct ModelMatrix {
+    mat4 model;
+    mat4 normalMatrix;
+    vec4 scale;
+    vec4 rotation;
+    vec4 position;
+};
+
+layout(set = 0, binding = 2) readonly buffer ModelMatrices {
+    ModelMatrix modelMatrices[];
+};
+
+// ── Binding 3: Per-pipeline graphics indirect buffers ─────────────────────────
+// One storage buffer per registered ParticleSystemPipeline, indexed by graphicsID.
+// Each buffer has MAX_PARTICLE_SYSTEMS slots indexed by the global particle system slot.
+// VkDrawIndexedIndirectCommand layout (std430):
+//   uint indexCount, uint instanceCount, uint firstIndex, int vertexOffset, uint firstInstance
+struct DrawIndexedIndirectCommand {
+    uint indexCount;
+    uint instanceCount; // 0 = culled/freed (pre-zeroed), particleCount = visible
+    uint firstIndex;
+    int  vertexOffset;
+    uint firstInstance; // = particleOffset; vertex shader uses gl_InstanceIndex as absolute idx
+};
+
+layout(set = 0, binding = 3) buffer GfxIndirect {
+    DrawIndexedIndirectCommand c[];
+} gfxCmds[];  // unsized array of SSBOs — one per gfx pipeline
+
+// ── Binding 4: Compute indirect buffer ────────────────────────────────────────
+// VkDispatchIndirectCommand layout: { uint x, uint y, uint z }
+// One entry per comp pipeline.  CPU resets x=0, y=1, z=1 before this dispatch.
+// This shader atomicAdd's into x, accumulating total sim workgroups for pipeline K.
+struct DispatchIndirectCommand {
+    uint x;
+    uint y;
+    uint z;
+};
+
+layout(set = 0, binding = 4) buffer CompIndirect {
+    DispatchIndirectCommand compCommands[];
+};
+
+// ── Binding 5: Dispatch table ──────────────────────────────────────────────────
+// Layout: dispatchTable[K * MAX_DISPATCH_PER_PIPELINE + localWgIdx]
+//   where K = computeID and localWgIdx is within [0, compCommands[K].x).
+// The sim shader reads its entry using gl_WorkGroupID.x as localWgIdx.
+struct ParticleDispatchEntry {
+    uint particleBase; // absolute first particle index for this workgroup
+    uint systemSlot;   // which ParticleSystemInstance this workgroup belongs to
+    uint pad0;
+    uint pad1;
+};
+
+layout(set = 0, binding = 5) buffer DispatchTable {
+    ParticleDispatchEntry dispatchTable[];
+};
+// ── Binding 6: Per-pipeline gfx draw counts ───────────────────────────────────────
+// One uint per registered ParticleSystemPipeline, indexed by graphicsID.
+// Cleared to 0 each frame by CPU; this shader atomicAdds 1 per visible system.
+// CPU uses vkCmdDrawIndexedIndirectCount with this buffer as the count source.
+layout(set = 0, binding = 6) buffer GfxDrawCounts {
+    uint counts[];
+} gfxDrawCounts;
+// ── Frustum sphere test ────────────────────────────────────────────────────────
+// Returns true if the sphere (centre, radius) is not fully outside any of the
+// 6 frustum planes. Plane convention: dot(plane.xyz, point) + plane.w >= 0 = inside.
+bool sphereInsideFrustum(vec3 centre, float radius) {
+    for (int i = 0; i < 6; ++i) {
+        if (dot(camera.frustumPlanes[i].xyz, centre) + camera.frustumPlanes[i].w < -radius)
+            return false;
+    }
+    return true;
+}
+
+void main() {
+    uint slot = gl_GlobalInvocationID.x;
+    if (slot >= pc.systemCount) return;
+
+    ParticleSystemInstance inst = instances[slot];
+
+    // Freed slots have transformID = UINT_MAX — skip without modifying buffers.
+    // The per-frame vkCmdFillBuffer already zeroed all gfxCmds entries.
+    if (inst.transformID == 0xFFFFFFFFu) {
+        instances[slot].isActive = 0u;
+        return;
+    }
+
+    // ── Bounding sphere world-space centre ────────────────────────────────────
+    vec4 worldCentre = modelMatrices[inst.transformID].model
+                       * inst.localOffset
+                       * vec4(0.0, 0.0, 0.0, 1.0);
+
+    bool visible = sphereInsideFrustum(worldCentre.xyz, inst.boundingSphereRadius);
+
+    if (!visible) {
+        // Culled: mark inactive so the sim shader skips this system.
+        // gfxCmds[graphicsID].c[slot] is already zeroed by the per-frame fill.
+        instances[slot].isActive = 0u;
+        return;
+    }
+
+    instances[slot].isActive = 1u;
+
+    // ── Build graphics draw command ────────────────────────────────────────────
+    // Atomically reserve a packed slot in the gfx pipeline's indirect buffer.
+    // Using atomicAdd keeps commands contiguous from index 0, matching the
+    // mesh/skeleton pattern, so vkCmdDrawIndexedIndirectCount draws exactly
+    // the visible subset with no zero-instance padding draws.
+    uint gfxID  = inst.graphicsID;
+    uint cmdIdx = atomicAdd(gfxDrawCounts.counts[gfxID], 1);
+    gfxCmds[nonuniformEXT(gfxID)].c[cmdIdx].indexCount    = inst.indexCount;
+    gfxCmds[nonuniformEXT(gfxID)].c[cmdIdx].instanceCount = inst.particleCount;
+    gfxCmds[nonuniformEXT(gfxID)].c[cmdIdx].firstIndex    = inst.firstIndex;
+    gfxCmds[nonuniformEXT(gfxID)].c[cmdIdx].vertexOffset  = inst.vertexOffset;
+    gfxCmds[nonuniformEXT(gfxID)].c[cmdIdx].firstInstance = inst.particleOffset;
+
+    // ── Schedule simulation workgroups ─────────────────────────────────────────
+    uint numGroups = (inst.particleCount + SIM_WORKGROUP_SIZE - 1u) / SIM_WORKGROUP_SIZE;
+
+    // atomicAdd accumulates total workgroup count for this comp pipeline (x field)
+    // and returns the pipeline-local base index for the dispatch table entries.
+    uint base = atomicAdd(compCommands[inst.computeID].x, numGroups);
+
+    // Write one dispatch table entry per sim workgroup.
+    uint tableBase = inst.computeID * MAX_DISPATCH_PER_PIPELINE + base;
+    for (uint i = 0u; i < numGroups; ++i) {
+        if (base + i >= MAX_DISPATCH_PER_PIPELINE) break;
+
+        dispatchTable[tableBase + i].particleBase = inst.particleOffset + i * SIM_WORKGROUP_SIZE;
+        dispatchTable[tableBase + i].systemSlot   = slot;
+        dispatchTable[tableBase + i].pad0         = 0u;
+        dispatchTable[tableBase + i].pad1         = 0u;
+    }
+}

@@ -1,18 +1,29 @@
 {
   "version": "0.2.0",
   "configurations": [
-  
     {
-      "name": "Release lca_example6",
+      "name": "Debug lca_example9",
       "type": "cppvsdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/build/examples/example6/Release/lca_example6.exe",
+      "program": "${workspaceFolder}/build/examples/example9/Debug/lca_example9.exe",
       "args": [],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
       "environment": [],
       "console": "integratedTerminal",
-      "preLaunchTask": "build lca_example6 (Release)"
+      "preLaunchTask": "build lca_example9 (Debug)"
     },
+    {
+      "name": "Release lca_example9",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/examples/example9/Release/lca_example9.exe",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "console": "integratedTerminal",
+      "preLaunchTask": "build lca_example9 (Release)"
+    }
   ]
 }

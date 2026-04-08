@@ -1,0 +1,179 @@
+#version 450
+
+// Example particle simulation compute shader.
+// Registered as a ParticleSystemCompPipeline.  Implements simple Newtonian
+// motion with gravity and random respawn.  Copy and modify this file to create
+// custom particle behaviours (e.g. smoke, sparks, confetti).
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// ── Constants (must match Renderer.hpp) ──────────────────────────────────────
+const uint MAX_DISPATCH_PER_PIPELINE = 2048u; // MAX_PARTICLES / local_size_x
+
+// ── Push constant ─────────────────────────────────────────────────────────────
+// Set by the CPU to the index K of this pipeline in particleCompPipelines[].
+// Used to compute the pipeline's strided region in the dispatch table.
+layout(push_constant) uniform PC {
+    uint pipelineIndex;
+} pc;
+
+// ── Binding 0: Particle system instances ──────────────────────────────────────
+struct ParticleSystemInstance {
+    uint  transformID;
+    uint  computeID;
+    uint  graphicsID;
+    uint  meshID;
+    uint  materialID;
+    uint  particleOffset;
+    uint  particleCount;
+    uint  isActive;             // 0 = culled by ParticleCullPipeline, 1 = visible
+    uint  indexCount;
+    uint  firstIndex;
+    int   vertexOffset;
+    float boundingSphereRadius;
+    mat4  localOffset;
+};
+
+layout(set = 0, binding = 0) readonly buffer ParticleSystemInstances {
+    ParticleSystemInstance instances[];
+};
+
+// ── Binding 1: Particle storage ────────────────────────────────────────────────
+// position.xyz = system-local position,  position.w = remaining lifetime (s)
+// velocity.xyz = velocity (m/s),         velocity.w = max lifetime (s)
+// color        = rgba tint
+// params.x     = size scale,  params.yzw = user data
+struct Particle {
+    vec4 position;
+    vec4 velocity;
+    vec4 color;
+    vec4 params;
+};
+
+layout(set = 0, binding = 1) buffer Particles {
+    Particle particles[];
+};
+
+// ── Binding 2: Model matrices ──────────────────────────────────────────────────
+struct ModelMatrix {
+    mat4 model;
+    mat4 normalMatrix;
+    vec4 scale;
+    vec4 rotation;
+    vec4 position;
+};
+
+layout(set = 0, binding = 2) readonly buffer ModelMatrices {
+    ModelMatrix modelMatrices[];
+};
+
+// ── Binding 3: Frame delta time ────────────────────────────────────────────────
+layout(set = 0, binding = 3) uniform DeltaTimeUBO {
+    float deltaTime;
+    float _pad0;
+    float _pad1;
+    float _pad2;
+} time;
+
+// ── Binding 4: Dispatch table ──────────────────────────────────────────────────
+// Written by ParticleCullPipeline; maps (pipelineIndex, gl_WorkGroupID.x) to work.
+// Entry at [pipelineIndex * MAX_DISPATCH_PER_PIPELINE + gl_WorkGroupID.x]:
+//   particleBase — absolute index of the first particle this workgroup processes
+//   systemSlot   — which ParticleSystemInstance owns these particles
+struct ParticleDispatchEntry {
+    uint particleBase;
+    uint systemSlot;
+    uint pad0;
+    uint pad1;
+};
+
+layout(set = 0, binding = 4) readonly buffer DispatchTable {
+    ParticleDispatchEntry dispatchTable[];
+};
+
+// ── Simulation constants ───────────────────────────────────────────────────────
+const vec3  GRAVITY         = vec3(0.0, -9.81, 0.0);
+const float RESPAWN_SPEED   = 3.0; // m/s initial speed spread on respawn
+
+// ── Pseudo-random helpers ──────────────────────────────────────────────────────
+uint hashPCG(uint v) {
+    uint state = v * 747796405u + 2891336453u;
+    uint word  = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+// Maps a uint hash to [-1, 1].
+float randSigned(uint seed) {
+    return float(hashPCG(seed)) / float(0x7FFFFFFFu) - 1.0;
+}
+
+// Maps a uint hash to [0, 1].
+float randPositive(uint seed) {
+    return float(hashPCG(seed)) / float(0xFFFFFFFFu);
+}
+
+void main() {
+    // ── Find this invocation's particle ──────────────────────────────────────
+    uint tableIdx  = pc.pipelineIndex * MAX_DISPATCH_PER_PIPELINE + gl_WorkGroupID.x;
+    ParticleDispatchEntry entry = dispatchTable[tableIdx];
+
+    uint particleIdx = entry.particleBase + gl_LocalInvocationIndex;
+    uint systemSlot  = entry.systemSlot;
+
+    ParticleSystemInstance inst = instances[systemSlot];
+
+    // Bounds guard for the last (potentially partial) workgroup of a system.
+    uint systemEnd = inst.particleOffset + inst.particleCount;
+    if (particleIdx >= systemEnd) return;
+
+    // Skip culled systems — cull shader set isActive = 0.
+    if (inst.isActive == 0u) return;
+
+    Particle p  = particles[particleIdx];
+    float    dt = time.deltaTime;
+
+    // ── Integrate motion ──────────────────────────────────────────────────────
+    p.velocity.xyz += GRAVITY * dt;
+    p.position.xyz += p.velocity.xyz * dt;
+    p.position.w   -= dt; // remaining lifetime counts down to 0
+
+    // ── Respawn dead particles ────────────────────────────────────────────────
+    if (p.position.w <= 0.0) {
+        // Deterministic seed: combine particle index with a per-frame salt so
+        // every dead particle gets a unique random direction.
+        uint seed = particleIdx ^ hashPCG(uint(dt * 65536.0));
+
+        // Reset position to the emitter origin (system local space).
+        p.position.xyz = vec3(0.0);
+
+        // Initialise max lifetime on first spawn (velocity.w starts as 0 from GPU fill).
+        if (p.velocity.w <= 0.0) {
+            p.velocity.w = 1.5 + randPositive(seed + 5u) * 1.5; // 1.5–3.0 s
+        }
+        p.position.w = p.velocity.w; // restore to max lifetime
+
+        // Random outward velocity in a hemisphere pointing +Y.
+        float theta = randPositive(seed)      * 6.28318; // azimuth [0, 2PI)
+        float phi   = randPositive(seed + 1u) * 1.5708;  // elevation [0, PI/2)
+        float speed = randPositive(seed + 2u) * RESPAWN_SPEED + 0.5;
+        p.velocity.x = cos(theta) * sin(phi) * speed;
+        p.velocity.y = cos(phi) * speed;
+        p.velocity.z = sin(theta) * sin(phi) * speed;
+
+        // Randomise color on respawn (fade from white to warm orange).
+        p.color = vec4(1.0,
+                       0.4 + randPositive(seed + 3u) * 0.6,
+                       randPositive(seed + 4u) * 0.3,
+                       1.0);
+
+        // Particle size: initialise on first spawn (params.x starts as 0 from GPU fill).
+        if (p.params.x <= 0.0) {
+            p.params.x = 0.04 + randPositive(seed + 6u) * 0.04; // 0.04–0.08 world units
+        }
+
+        // Always stamp owning system slot so vertex shader can look up the transform.
+        p.params.y = uintBitsToFloat(systemSlot);
+    }
+
+    particles[particleIdx] = p;
+}

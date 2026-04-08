@@ -50,9 +50,37 @@ namespace Lca{
                 skeletonDrawCounts[i] = createBuffer(Lca::Core::MAX_SHADERS, sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
                 skeletonDepthPrePassBuffer[i] = createBuffer(Lca::Core::MAX_OBJECTS, sizeof(VkDrawIndexedIndirectCommand), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
                 skeletonDepthPrePassCountBuffer[i] = createBuffer(1, sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
-                
+
+                // ── Particle system rendering buffers ─────────────────
+                particleSystemInstancesGPU[i] = createDualBuffer(Lca::Core::MAX_PARTICLE_SYSTEMS, sizeof(ParticleSystemInstance), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+                particleDeltaTimeBuffer[i]     = createDualBuffer(1, sizeof(ParticleDeltaTimeUniform), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+                particleGfxDrawCounts[i] = createBuffer(Lca::Core::MAX_PARTICLE_GFX_PIPELINES, sizeof(uint32_t),
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
             }
 
+            // Per-pipeline device-local indirect buffers written every frame by ParticleCullPipeline.
+            // particleGfxIndirectBuffers[graphicsID][slot]: VkDrawIndexedIndirectCommand
+            //   firstInstance = particleOffset, instanceCount = particleCount (0 when culled).
+            // Indexed by global particle system slot; buffers are created in addParticleSystemPipeline().
+            // One VkDispatchIndirectCommand per comp pipeline (not per system).
+            // y and z are always 1; only x (workgroup count) varies and is written by the cull shader.
+            // The CPU resets x to 0 each frame via vkCmdUpdateBuffer before the cull dispatch.
+            particleCompIndirectBuffer = createBuffer(
+                Lca::Core::MAX_PARTICLE_COMP_PIPELINES, sizeof(VkDispatchIndirectCommand),
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+            // Dispatch table: maps global workgroup ID -> (particleBase, systemSlot).
+            // Written by the cull shader; read by the sim shader via gl_WorkGroupID.x.
+            particleDispatchTableBuffer = createBuffer(
+                Lca::Core::MAX_PARTICLE_DISPATCH_ENTRIES, sizeof(ParticleDispatchEntry),
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+
+            // One large device-local particle storage buffer shared by all systems.
+            particleStorageBuffer = createBuffer(Lca::Core::MAX_PARTICLES, sizeof(Particle),
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+            currentParticleTop = 0;
+            particleFreeRanges.clear();
+
+            // If comp pipelines were registered before init(), initialise their y=1, z=1 now.
             shaderCapacities = createDualBuffer(Lca::Core::MAX_SHADERS, sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
             memset(shaderCapacities.interface.pMemory, 0, Lca::Core::MAX_SHADERS * sizeof(uint32_t));
             dummyIndirectBuffer = createBuffer(Lca::Core::MAX_OBJECTS, sizeof(VkDrawIndexedIndirectCommand), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
@@ -114,12 +142,27 @@ namespace Lca{
 
             skeletonCullPipeline = std::make_unique<SkeletonCullPipeline>("shader/skeleton_cull.comp.spv");
             skeletonCullPipeline->build();
+
+            // Pre-reserve so that addParticleSystemPipeline() / addMeshPipeline() never
+            // trigger a reallocation.  Pipeline has no user-defined move constructor, so a
+            // reallocation would copy the raw VkPipeline handle then destroy the old element,
+            // calling vkDestroyPipeline on a still-live handle (use-after-free / 0xee handle).
+            particlePipelines.reserve(Lca::Core::MAX_PARTICLE_GFX_PIPELINES);
+            meshPipelines.reserve(Lca::Core::MAX_SHADERS);
+            skeletonMeshPipelines.reserve(Lca::Core::MAX_SHADERS);
+
+            // Particle cull pipeline: built after all particle pipelines are registered
+            // (same pattern as uberCull). The shader path placeholder will be replaced
+            // once particle_cull.comp.spv is compiled.
+            particleCullPipeline = std::make_unique<ParticleCullPipeline>("shader/particle_cull.comp.spv");
+            particleCullPipeline->build();
             
             lightCullPipeline = std::make_unique<LightCullPipeline>("shader/light_cull.comp.spv");
             lightCullPipeline->build();
         }
 
         void Renderer::shutdown(){
+            particleCullPipeline.reset();
             uberCullPipeline.reset();
             skeletonCullPipeline.reset();
             depthPipeline.reset();
@@ -142,7 +185,23 @@ namespace Lca{
                 destroyBuffer(skeletonDrawCounts[i]);
                 destroyBuffer(skeletonDepthPrePassBuffer[i]);
                 destroyBuffer(skeletonDepthPrePassCountBuffer[i]);
+
+                destroyDualBuffer(particleSystemInstancesGPU[i]);
+                destroyDualBuffer(particleDeltaTimeBuffer[i]);
+                destroyBuffer(particleGfxDrawCounts[i]);
             }
+            destroyBuffer(particleStorageBuffer);
+            for (auto& buf : particleGfxIndirectBuffers) { destroyBuffer(buf); }
+            particleGfxIndirectBuffers.clear();
+            destroyBuffer(particleCompIndirectBuffer);
+            destroyBuffer(particleDispatchTableBuffer);
+
+            particlePipelines.clear();
+            particlePipelineMap.clear();
+            particleGfxSystems.clear();
+            particleCompPipelines.clear();
+            particleCompPipelineMap.clear();
+            particleCompSystems.clear();
             destroyDualBuffer(shaderCapacities);
             destroyBuffer(dummyIndirectBuffer);
 
@@ -203,6 +262,10 @@ namespace Lca{
             skeletonInstancesGPU[frameIndex].recordSyncRanges(command[frameIndex], dirtySkeletonInstanceIndices_[frameIndex]);
             dirtySkeletonInstanceIndices_[frameIndex].clear();
 
+            // Particle system instance uploads and deltaTime uniform
+            particleSystemInstancesGPU[frameIndex].recordSyncRanges(command[frameIndex], dirtyParticleSystemIndices[frameIndex]);
+            particleDeltaTimeBuffer[frameIndex].recordSync(command[frameIndex]);
+
             vkCmdFillBuffer(command[frameIndex].vkCommandBuffer, drawCounts[frameIndex].vkBuffer, 0, VK_WHOLE_SIZE, 0);
             for (auto& indirectBuffer : indirectBuffers[frameIndex]) {
                 vkCmdFillBuffer(command[frameIndex].vkCommandBuffer, indirectBuffer.vkBuffer, 0, VK_WHOLE_SIZE, 0);
@@ -230,6 +293,18 @@ namespace Lca{
             }
             vkCmdFillBuffer(command[frameIndex].vkCommandBuffer, skeletonDepthPrePassCountBuffer[frameIndex].vkBuffer, 0, VK_WHOLE_SIZE, 0);
             vkCmdFillBuffer(command[frameIndex].vkCommandBuffer, lightIndicesBuffer[frameIndex].vkBuffer, 0, VK_WHOLE_SIZE, 0);
+
+            // Reset per-pipeline particle graphics indirect buffers and draw counts.
+            // The cull shader packs visible draw commands from index 0 and writes the
+            // per-pipeline count into particleGfxDrawCounts so the GPU knows how many to draw.
+            if (!particleGfxIndirectBuffers.empty()) {
+                vkCmdFillBuffer(command[frameIndex].vkCommandBuffer,
+                    particleGfxDrawCounts[frameIndex].vkBuffer, 0, VK_WHOLE_SIZE, 0);
+                for (auto& gfxBuf : particleGfxIndirectBuffers) {
+                    vkCmdFillBuffer(command[frameIndex].vkCommandBuffer,
+                        gfxBuf.vkBuffer, 0, VK_WHOLE_SIZE, 0);
+                }
+            }
 
             VkMemoryBarrier transferToShaderBarrier{};
             transferToShaderBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -304,17 +379,98 @@ namespace Lca{
                 }
             }
 
+            // --- Particle cull dispatch ---
+            // One invocation per registered particle system slot.
+            // Writes VkDrawIndexedIndirectCommand into particleGfxIndirectBuffer (per slot),
+            // atomically accumulates x into particleCompIndirectBuffer (per comp pipeline),
+            // and writes dispatchTable entries mapping global workgroup ID -> (particleBase, systemSlot).
+            if (particleSystemRegisteredCount > 0 && particleCullPipeline) {
+                // Reset x=0 for each active comp pipeline.  y and z remain 1 (written at registration).
+                // vkCmdUpdateBuffer is a TRANSFER command, covered by the existing transferToShaderBarrier.
+                for (uint32_t k = 0; k < static_cast<uint32_t>(particleCompPipelines.size()); ++k) {
+                    const VkDispatchIndirectCommand reset{0, 1, 1};
+                    vkCmdUpdateBuffer(command[frameIndex].vkCommandBuffer,
+                        particleCompIndirectBuffer.vkBuffer,
+                        k * sizeof(VkDispatchIndirectCommand),
+                        sizeof(VkDispatchIndirectCommand), &reset);
+                }
+
+                struct ParticleCullPC { uint32_t systemCount; uint32_t _pad; };
+                ParticleCullPC pc{ particleSystemRegisteredCount, 0u };
+                VkDescriptorSet descSet = particleCullPipeline->getVkDescriptorSet(frameIndex);
+                vkCmdBindPipeline(command[frameIndex].vkCommandBuffer,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    particleCullPipeline->getVkPipeline());
+                vkCmdBindDescriptorSets(command[frameIndex].vkCommandBuffer,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    particleCullPipeline->getVkPipelineLayout(),
+                    0, 1, &descSet, 0, nullptr);
+                vkCmdPushConstants(command[frameIndex].vkCommandBuffer,
+                    particleCullPipeline->getVkPipelineLayout(),
+                    VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ParticleCullPC), &pc);
+
+                constexpr uint32_t CULL_WORKGROUP = 64;
+                const uint32_t cullGroups = (particleSystemRegisteredCount + CULL_WORKGROUP - 1) / CULL_WORKGROUP;
+                vkCmdDispatch(command[frameIndex].vkCommandBuffer, cullGroups, 1, 1);
+
+                // Barrier: cull writes (comp indirect x, gfx indirect, dispatch table, active flags)
+                // must be visible before:
+                //   - sim dispatches read comp indirect (INDIRECT_COMMAND_READ) and dispatch table (SHADER_READ)
+                //   - draw-indirect stage reads gfx indirect (INDIRECT_COMMAND_READ, later in the frame)
+                VkMemoryBarrier particleCullBarrier{};
+                particleCullBarrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+                particleCullBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                particleCullBarrier.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
+                vkCmdPipelineBarrier(command[frameIndex].vkCommandBuffer,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                    0, 1, &particleCullBarrier, 0, nullptr, 0, nullptr);
+            }
+
+            // --- Particle simulation: ONE vkCmdDispatchIndirect per comp pipeline ---
+            // The cull shader:
+            //   - accumulated x = total workgroups into particleCompIndirectBuffer[K]
+            //   - wrote dispatchTable[K * MAX_DISPATCH_PER_PIPELINE + (0..x-1)]
+            //       = { particleBase, systemSlot } for every scheduled workgroup
+            // The sim shader reads dispatchTable[pipelineIndex * MAX_DISPATCH_PER_PIPELINE
+            //                                    + gl_WorkGroupID.x] to find its work.
+            for (uint32_t compIdx = 0; compIdx < static_cast<uint32_t>(particleCompPipelines.size()); ++compIdx) {
+                if (particleCompSystems[compIdx].empty()) continue;
+
+                VkDescriptorSet descSet = particleCompPipelines[compIdx]->getVkDescriptorSet(frameIndex);
+                vkCmdBindPipeline(command[frameIndex].vkCommandBuffer,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    particleCompPipelines[compIdx]->getVkPipeline());
+                vkCmdBindDescriptorSets(command[frameIndex].vkCommandBuffer,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    particleCompPipelines[compIdx]->getVkPipelineLayout(),
+                    0, 1, &descSet, 0, nullptr);
+                // Pass pipelineIndex so the shader can compute its dispatch table base:
+                //   dispatchTable[pipelineIndex * MAX_DISPATCH_PER_PIPELINE + gl_WorkGroupID.x]
+                vkCmdPushConstants(command[frameIndex].vkCommandBuffer,
+                    particleCompPipelines[compIdx]->getVkPipelineLayout(),
+                    VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t), &compIdx);
+                // x = total workgroups for all visible systems using this pipeline.
+                vkCmdDispatchIndirect(command[frameIndex].vkCommandBuffer,
+                    particleCompIndirectBuffer.vkBuffer,
+                    static_cast<VkDeviceSize>(compIdx) * sizeof(VkDispatchIndirectCommand));
+            }
+
             {
-                // Ensure compute writes are visible to the subsequent depth pre-pass indirect draw.
+                // Ensure compute writes (cull + particle simulation) are visible
+                // to the subsequent depth pre-pass indirect draw and vertex reads.
                 VkMemoryBarrier uberToDepthBarrier{};
                 uberToDepthBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
                 uberToDepthBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-                uberToDepthBarrier.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+                uberToDepthBarrier.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT |
+                                                   VK_ACCESS_SHADER_READ_BIT;
 
                 vkCmdPipelineBarrier(
                     command[frameIndex].vkCommandBuffer,
                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+                    VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT |
+                    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                     0,
                     1,
                     &uberToDepthBarrier,
@@ -680,6 +836,47 @@ namespace Lca{
                             skelIndirectBuffer.numberElements,
                             sizeof(VkDrawIndexedIndirectCommand)
                         );
+                    }
+                }
+
+                // --- Particle system rendering ---
+                // Each particle system has one VkDrawIndexedIndirectCommand at
+                // particleGfxIndirectBuffer[slot].  The cull shader sets instanceCount=0
+                // for culled systems so the GPU skips them with zero GPU work.
+                if (!particlePipelines.empty()) {
+                    const Buffer meshVertexBuffer = GetAssetManager().getVertexBuffer();
+                    const Buffer meshIndexBuffer  = GetAssetManager().getIndexBuffer();
+                    VkBuffer vkMeshVB = meshVertexBuffer.vkBuffer;
+                    vkCmdBindVertexBuffers(command[frameIndex].vkCommandBuffer, 0, 1, &vkMeshVB, offsets);
+                    vkCmdBindIndexBuffer(command[frameIndex].vkCommandBuffer, meshIndexBuffer.vkBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+                    for (uint32_t gfxIdx = 0; gfxIdx < static_cast<uint32_t>(particlePipelines.size()); ++gfxIdx) {
+                        const auto& slots = particleGfxSystems[gfxIdx];
+                        if (slots.empty()) continue;
+
+                        VkDescriptorSet descSet = particlePipelines[gfxIdx].getVkDescriptorSet(frameIndex);
+                        vkCmdBindPipeline(command[frameIndex].vkCommandBuffer,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            particlePipelines[gfxIdx].getVkPipeline());
+                        vkCmdBindDescriptorSets(command[frameIndex].vkCommandBuffer,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            particlePipelines[gfxIdx].getVkPipelineLayout(),
+                            0, 1, &descSet, 0, nullptr);
+
+                        // One batched draw call per gfx pipeline.
+                        // The cull shader packed visible draw commands from index 0 and wrote
+                        // the count into particleGfxDrawCounts[gfxIdx].
+                        //   firstInstance = particleOffset → gl_InstanceIndex = absolute particle index
+                        // The vertex shader reads particle.params.y (floatBitsToUint) to get
+                        // the system slot for transform and material lookup.
+                        vkCmdDrawIndexedIndirectCount(
+                            command[frameIndex].vkCommandBuffer,
+                            particleGfxIndirectBuffers[gfxIdx].vkBuffer,
+                            0,
+                            particleGfxDrawCounts[frameIndex].vkBuffer,
+                            static_cast<VkDeviceSize>(gfxIdx) * sizeof(uint32_t),
+                            particleGfxIndirectBuffers[gfxIdx].numberElements,
+                            sizeof(VkDrawIndexedIndirectCommand));
                     }
                 }
 
@@ -1051,6 +1248,171 @@ namespace Lca{
         Texture& Renderer::getDepthMap(uint32_t frameIndex) {
             LCA_ASSERT(frameIndex < MAX_FRAMES_IN_FLIGHT, "Renderer", "getDepthMap", "Frame index out of range.")
             return depthMaps[frameIndex];
+        }
+
+        // ── Particle storage range allocation (mirrors AssetManager mesh strategy) ──
+
+        uint32_t Renderer::allocateParticleRange(uint32_t count) {
+            for (size_t i = 0; i < particleFreeRanges.size(); ++i) {
+                if (particleFreeRanges[i].size >= count) {
+                    const uint32_t offset = particleFreeRanges[i].offset;
+                    if (particleFreeRanges[i].size == count) {
+                        particleFreeRanges.erase(particleFreeRanges.begin() + static_cast<ptrdiff_t>(i));
+                    } else {
+                        particleFreeRanges[i].offset += count;
+                        particleFreeRanges[i].size   -= count;
+                    }
+                    return offset;
+                }
+            }
+            const uint32_t offset = currentParticleTop;
+            currentParticleTop += count;
+            return offset;
+        }
+
+        void Renderer::freeParticleRange(uint32_t offset, uint32_t count) {
+            particleFreeRanges.push_back({offset, count});
+        }
+
+        // ── Particle system instance management ────────────────────────────────────
+
+        uint32_t Renderer::addParticleSystem(const ParticleSystemInstance& instance) {
+            LCA_ASSERT(instance.graphicsID < particlePipelines.size(), "Renderer", "addParticleSystem", "Invalid graphicsID.")
+            LCA_ASSERT(instance.computeID  < particleCompPipelines.size(), "Renderer", "addParticleSystem", "Invalid computeID.")
+
+            // --- Allocate particle range and fill in the offset ---
+            const uint32_t particleOffset = allocateParticleRange(instance.particleCount);
+
+            // --- Build the complete GPU instance record ---
+            // indexCount / firstIndex / vertexOffset are stored in the instance so the cull
+            // shader can write VkDrawIndexedIndirectCommand[slot] without a mesh-info SSBO.
+            const auto meshInfo = GetAssetManager().getMeshInfo(instance.meshID);
+            ParticleSystemInstance gpuInst  = instance;
+            gpuInst.particleOffset          = particleOffset;
+            gpuInst.active                  = 1u; // visible until cull decides otherwise
+            gpuInst.indexCount              = meshInfo.indexCount;
+            gpuInst.firstIndex              = meshInfo.firstIndex;
+            gpuInst.vertexOffset            = meshInfo.vertexOffset;
+            const uint32_t slot             = particleSystemSlots.add(gpuInst);
+
+            // Track high-water for cull dispatch sizing
+            particleSystemRegisteredCount = std::max(particleSystemRegisteredCount, slot + 1u);
+
+            // --- Zero-initialise the particle storage range ---
+            beginSingleCommand(singleCommand);
+            vkCmdFillBuffer(singleCommand.vkCommandBuffer,
+                particleStorageBuffer.vkBuffer,
+                static_cast<VkDeviceSize>(particleOffset) * sizeof(Particle),
+                static_cast<VkDeviceSize>(instance.particleCount) * sizeof(Particle),
+                0u);
+            endSingleCommand(singleCommand);
+            submitSingleCommand(singleCommand);
+
+            // Mark dirty in both frame slots so the DualBuffer upload happens next frame
+            for (uint32_t fi = 0; fi < MAX_FRAMES_IN_FLIGHT; fi++) {
+                dirtyParticleSystemIndices[fi].push_back(slot);
+            }
+
+            // --- Register for per-frame draw and sim tracking ---
+            particleCompSystems[gpuInst.computeID].push_back(slot);
+            particleGfxSystems[gpuInst.graphicsID].push_back(slot);
+
+            return slot;
+        }
+
+        void Renderer::updateParticleSystem(uint32_t id, const ParticleSystemInstance& instance) {
+            particleSystemSlots.update(id, instance);
+        }
+
+        void Renderer::removeParticleSystem(uint32_t id) {
+            // Remove from per-pipeline registration lists
+            for (auto& vec : particleCompSystems) {
+                auto it = std::find(vec.begin(), vec.end(), id);
+                if (it != vec.end()) { vec.erase(it); break; }
+            }
+            for (auto& vec : particleGfxSystems) {
+                auto it = std::find(vec.begin(), vec.end(), id);
+                if (it != vec.end()) { vec.erase(it); break; }
+            }
+            // No need to zero the gfx indirect slot: the cull shader will skip it once the slot
+            // is marked inactive (transformID = UINT32_MAX after remove).
+            particleSystemSlots.remove(id);
+        }
+
+        void Renderer::updateParticleDeltaTime(uint32_t frameIndex, float deltaTime) {
+            ParticleDeltaTimeUniform tu{deltaTime, {0.0f, 0.0f, 0.0f}};
+            memcpy(particleDeltaTimeBuffer[frameIndex].interface.pMemory, &tu, sizeof(ParticleDeltaTimeUniform));
+        }
+
+        // ── Particle compute pipeline management ───────────────────────────────────
+
+        uint32_t Renderer::addParticleSystemCompPipeline(const std::string& name, ParticleSystemCompPipeline&& pipeline) {
+            LCA_ASSERT(particleCompPipelineMap.find(name) == particleCompPipelineMap.end(),
+                "Renderer", "addParticleSystemCompPipeline", "Particle comp pipeline name already exists.")
+            LCA_ASSERT(particleCompPipelines.size() < Lca::Core::MAX_PARTICLE_COMP_PIPELINES,
+                "Renderer", "addParticleSystemCompPipeline", "MAX_PARTICLE_COMP_PIPELINES exceeded.")
+
+            const uint32_t id = static_cast<uint32_t>(particleCompPipelines.size());
+            particleCompPipelines.push_back(std::make_unique<ParticleSystemCompPipeline>(std::move(pipeline)));
+            particleCompPipelines.back()->build();
+            particleCompPipelineMap[name] = id;
+            particleCompSystems.emplace_back();
+
+            // Write y=1, z=1 for this pipeline's indirect command slot.
+            // x is reset to 0 each frame by vkCmdUpdateBuffer in recordFrame before the cull pass.
+            // If the buffer is already initialised (init() has run), update it immediately.
+            // If init() hasn't run yet, init() must write the y/z fields for all registered pipelines.
+            if (particleCompIndirectBuffer.vkBuffer != VK_NULL_HANDLE) {
+                beginSingleCommand(singleCommand);
+                const VkDispatchIndirectCommand initCmd{0, 1, 1};
+                vkCmdUpdateBuffer(singleCommand.vkCommandBuffer,
+                    particleCompIndirectBuffer.vkBuffer,
+                    id * sizeof(VkDispatchIndirectCommand),
+                    sizeof(VkDispatchIndirectCommand), &initCmd);
+                endSingleCommand(singleCommand);
+                submitSingleCommand(singleCommand);
+            }
+
+            return id;
+        }
+
+        uint32_t Renderer::getParticleSystemCompId(const std::string& name) const {
+            auto it = particleCompPipelineMap.find(name);
+            LCA_ASSERT(it != particleCompPipelineMap.end(), "Renderer", "getParticleSystemCompId", "Particle comp pipeline not found.")
+            return it->second;
+        }
+
+        // ── Particle graphics pipeline management ──────────────────────────────────
+
+        uint32_t Renderer::addParticleSystemPipeline(const std::string& name, ParticleSystemPipeline&& pipeline) {
+            LCA_ASSERT(particlePipelineMap.find(name) == particlePipelineMap.end(),
+                "Renderer", "addParticleSystemPipeline", "Particle pipeline name already exists.")
+
+            const uint32_t id = static_cast<uint32_t>(particlePipelines.size());
+            particlePipelines.push_back(std::move(pipeline));
+            particlePipelines.back().build();
+            particlePipelineMap[name] = id;
+            particleGfxSystems.emplace_back();
+            // Create the per-pipeline graphics indirect buffer (one per gfx pipeline).
+            // Indexed by global particle system slot so the cull shader can write
+            //   firstInstance = particleOffset, instanceCount = particleCount
+            // using only the global slot index — no pipelineLocalSlot remapping needed.
+            Buffer gfxBuf = createBuffer(
+                MAX_PARTICLE_SYSTEMS, sizeof(VkDrawIndexedIndirectCommand),
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT
+                | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+            particleGfxIndirectBuffers.push_back(gfxBuf);
+            // Refresh binding 3 of the cull pipeline descriptor so it sees the new buffer.
+            if (particleCullPipeline) {
+                particleCullPipeline->updateDescriptorSetWrites();
+            }
+            return id;
+        }
+
+        uint32_t Renderer::getParticleSystemPipelineId(const std::string& name) const {
+            auto it = particlePipelineMap.find(name);
+            LCA_ASSERT(it != particlePipelineMap.end(), "Renderer", "getParticleSystemPipelineId", "Particle pipeline not found.")
+            return it->second;
         }
     }
 }

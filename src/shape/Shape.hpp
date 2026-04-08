@@ -61,6 +61,24 @@ namespace Lca{
         }
 
     };
+
+    // Flat XY-plane quad facing +Z, intended for billboard particle systems.
+    // Vertices span [-halfSize, +halfSize] in X and Y with full [0,1]x[0,1] UVs.
+    struct Square {
+        Square(float halfSize = 0.5f, glm::vec3 offset = glm::vec3(0.0f), glm::vec4 color = glm::vec4(1.0f));
+
+    private:
+        std::vector<Vertex::Mesh> vertices;
+
+        std::vector<uint32_t> indices = {
+            0, 1, 2,
+            2, 3, 0
+        };
+
+    public:
+        const std::vector<Vertex::Mesh>& getVertices() { return vertices; }
+        const std::vector<uint32_t>& getIndices()      { return indices;  }
+    };
     
     }
 }

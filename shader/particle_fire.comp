@@ -1,0 +1,202 @@
+#version 450
+
+// particle_fire.comp — fire particle simulation compute shader.
+// Registered as a ParticleSystemCompPipeline.  Implements buoyancy-driven fire:
+//   • Particles spawn in a small cone at the emitter base.
+//   • Upward buoyancy force makes them rise and slow as they ash out.
+//   • Horizontal turbulence adds natural flickering.
+//   • Color transitions from hot yellow/white at birth to dark red at death.
+//   • Alpha fades in quickly and fades out as the particle expires.
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// ── Constants (must match Renderer.hpp) ───────────────────────────────────────
+const uint MAX_DISPATCH_PER_PIPELINE = 2048u;
+
+// ── Push constant ─────────────────────────────────────────────────────────────
+layout(push_constant) uniform PC {
+    uint pipelineIndex;
+} pc;
+
+// ── Binding 0: Particle system instances ──────────────────────────────────────
+struct ParticleSystemInstance {
+    uint  transformID;
+    uint  computeID;
+    uint  graphicsID;
+    uint  meshID;
+    uint  materialID;
+    uint  particleOffset;
+    uint  particleCount;
+    uint  isActive;
+    uint  indexCount;
+    uint  firstIndex;
+    int   vertexOffset;
+    float boundingSphereRadius;
+    mat4  localOffset;
+};
+
+layout(set = 0, binding = 0) readonly buffer ParticleSystemInstances {
+    ParticleSystemInstance instances[];
+};
+
+// ── Binding 1: Particle storage ────────────────────────────────────────────────
+// position.xyz = system-local position,  position.w = remaining lifetime (s)
+// velocity.xyz = velocity (m/s),         velocity.w = max lifetime (s)
+// color        = rgba tint (hot→cool, alpha = lifecycle fade)
+// params.x     = size scale,  params.y = system slot (uint bits)
+// params.z     = initial size (used to keep size stable)
+struct Particle {
+    vec4 position;
+    vec4 velocity;
+    vec4 color;
+    vec4 params;
+};
+
+layout(set = 0, binding = 1) buffer Particles {
+    Particle particles[];
+};
+
+// ── Binding 2: Model matrices ──────────────────────────────────────────────────
+struct ModelMatrix {
+    mat4 model;
+    mat4 normalMatrix;
+    vec4 scale;
+    vec4 rotation;
+    vec4 position;
+};
+
+layout(set = 0, binding = 2) readonly buffer ModelMatrices {
+    ModelMatrix modelMatrices[];
+};
+
+// ── Binding 3: Frame delta time ────────────────────────────────────────────────
+layout(set = 0, binding = 3) uniform DeltaTimeUBO {
+    float deltaTime;
+    float _pad0;
+    float _pad1;
+    float _pad2;
+} time;
+
+// ── Binding 4: Dispatch table ──────────────────────────────────────────────────
+struct ParticleDispatchEntry {
+    uint particleBase;
+    uint systemSlot;
+    uint pad0;
+    uint pad1;
+};
+
+layout(set = 0, binding = 4) readonly buffer DispatchTable {
+    ParticleDispatchEntry dispatchTable[];
+};
+
+// ── Fire constants ─────────────────────────────────────────────────────────────
+const float FIRE_INIT_SPEED   = 1.8;   // m/s base upward speed at spawn
+const float FIRE_SPREAD       = 0.6;   // m/s radial spread of the spawn cone
+const float FIRE_BUOYANCY     = 2.5;   // m/s² ongoing upward acceleration
+const float FIRE_DRAG         = 0.98;  // per-frame horizontal drag factor
+const float FIRE_TURBULENCE   = 1.2;   // m/s² horizontal turbulence strength
+const float FIRE_MIN_LIFETIME = 0.6;
+const float FIRE_MAX_LIFETIME = 2.0;
+const float FIRE_MIN_SIZE     = 0.18;
+const float FIRE_MAX_SIZE     = 0.42;
+
+// ── Pseudo-random helpers ──────────────────────────────────────────────────────
+uint hashPCG(uint v) {
+    uint state = v * 747796405u + 2891336453u;
+    uint word  = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+float randSigned(uint seed) {
+    return float(hashPCG(seed)) / float(0x7FFFFFFFu) - 1.0;
+}
+
+float randPositive(uint seed) {
+    return float(hashPCG(seed)) / float(0xFFFFFFFFu);
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+void main() {
+    uint tableIdx   = pc.pipelineIndex * MAX_DISPATCH_PER_PIPELINE + gl_WorkGroupID.x;
+    ParticleDispatchEntry entry = dispatchTable[tableIdx];
+
+    uint particleIdx = entry.particleBase + gl_LocalInvocationIndex;
+    uint systemSlot  = entry.systemSlot;
+
+    ParticleSystemInstance inst = instances[systemSlot];
+
+    uint systemEnd = inst.particleOffset + inst.particleCount;
+    if (particleIdx >= systemEnd) return;
+    if (inst.isActive == 0u) return;
+
+    Particle p  = particles[particleIdx];
+    float    dt = time.deltaTime;
+
+    // ── Integrate motion ──────────────────────────────────────────────────────
+    // Buoyancy lifts hot gas; horizontal turbulence simulates air currents.
+    uint tseed  = particleIdx ^ hashPCG(uint(p.position.w * 65536.0));
+    float turbX = randSigned(tseed)       * FIRE_TURBULENCE * dt;
+    float turbZ = randSigned(tseed + 11u) * FIRE_TURBULENCE * dt;
+
+    p.velocity.x = p.velocity.x * FIRE_DRAG + turbX;
+    p.velocity.y += FIRE_BUOYANCY * dt;
+    p.velocity.z = p.velocity.z * FIRE_DRAG + turbZ;
+
+    p.position.xyz += p.velocity.xyz * dt;
+    p.position.w   -= dt;
+
+    // ── Update colour from age ────────────────────────────────────────────────
+    float ageFrac = p.position.w / max(p.velocity.w, 0.001);  // 1 = fresh, 0 = dying
+
+    // Hot yellow at birth, dark red near death
+    p.color.r = mix(0.45, 1.00, ageFrac);
+    p.color.g = mix(0.00, 0.88, ageFrac * ageFrac);
+    p.color.b = mix(0.00, 0.25, ageFrac * ageFrac * ageFrac);
+
+    // Alpha envelope: fade in sharply, maintain, fade out near end
+    float deathFrac = 1.0 - ageFrac;
+    float spawnFade = clamp(deathFrac * 12.0, 0.0, 1.0); // fully opaque after ~8% of life
+    float deathFade = 1.0 - clamp((deathFrac - 0.55) / 0.45, 0.0, 1.0); // fade out last 45%
+    p.color.a = spawnFade * deathFade;
+
+    // ── Respawn dead particles ────────────────────────────────────────────────
+    if (p.position.w <= 0.0) {
+        uint seed = particleIdx ^ hashPCG(uint(dt * 65536.0));
+
+        // Reset to emitter origin (system-local space)
+        p.position.xyz = vec3(0.0);
+
+        // Initialise max lifetime on very first spawn (velocity.w = 0 from vkCmdFillBuffer)
+        if (p.velocity.w <= 0.0) {
+            p.velocity.w = FIRE_MIN_LIFETIME
+                         + randPositive(seed + 7u) * (FIRE_MAX_LIFETIME - FIRE_MIN_LIFETIME);
+        }
+        p.position.w = FIRE_MIN_LIFETIME
+                     + randPositive(seed + 7u) * (FIRE_MAX_LIFETIME - FIRE_MIN_LIFETIME);
+        p.velocity.w = p.position.w;
+
+        // Spawn cone: mostly upward with a small horizontal spread
+        float theta  = randPositive(seed)      * 6.28318;     // azimuth [0, 2π)
+        float spread = randPositive(seed + 1u) * FIRE_SPREAD; // horizontal radius
+        float upSpeed = FIRE_INIT_SPEED * (0.7 + randPositive(seed + 2u) * 0.6);
+
+        p.velocity.x = cos(theta) * spread;
+        p.velocity.y = upSpeed;
+        p.velocity.z = sin(theta) * spread;
+
+        // Initialise particle size (stored in params.z as initial size)
+        if (p.params.z <= 0.0) {
+            p.params.z = FIRE_MIN_SIZE + randPositive(seed + 8u) * (FIRE_MAX_SIZE - FIRE_MIN_SIZE);
+        }
+        p.params.x = p.params.z; // reset to initial size on respawn
+
+        // Stamp owning system slot so the vertex shader can look up the transform
+        p.params.y = uintBitsToFloat(systemSlot);
+
+        // Birth colour: hot
+        ageFrac = 1.0;
+        p.color = vec4(1.0, 0.88, 0.25, 0.0); // alpha 0 — will ramp up next frame
+    }
+
+    particles[particleIdx] = p;
+}
