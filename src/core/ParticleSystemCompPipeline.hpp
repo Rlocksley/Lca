@@ -16,6 +16,7 @@ namespace Lca {
         class ParticleSystemCompPipeline : public ComputePipeline {
         public:
             ParticleSystemCompPipeline(const std::string& computeShaderPath);
+            ParticleSystemCompPipeline(ParticleSystemCompPipeline&&) noexcept = default;
             virtual ~ParticleSystemCompPipeline() override = default;
 
             virtual void build() override;

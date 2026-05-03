@@ -88,6 +88,32 @@ namespace Lca{
             std::vector<SkeletonNodeInfo> nodes;
         };
 
+        // ── Font data ────────────────────────────────────────────────
+
+        struct FontCharacter {
+            char character;
+            float u1, v1, u2, v2;  // UV coordinates in the atlas
+            float width, height;   // glyph size (normalised to maxWidth)
+            float bearingY;        // vertical bearing (normalised)
+            float advanceX;        // horizontal advance (normalised)
+        };
+
+        // Per-character draw info: vertex/index range in the shared buffer
+        struct FontCharDrawInfo {
+            uint32_t indexCount;
+            uint32_t firstIndex;
+            int32_t  vertexOffset;
+        };
+
+        struct FontData {
+            uint32_t textureId;
+            uint32_t materialId;
+            float maxWidth;
+            float maxHeight;
+            std::unordered_map<char, FontCharacter> characters;
+            std::unordered_map<char, FontCharDrawInfo> drawInfos;
+        };
+
         using Model = std::vector<MeshInstance>;
 
 
@@ -116,6 +142,11 @@ namespace Lca{
             void removeSkeletonMesh(const std::string& name);
             uint32_t loadSkeleton(const std::string& name, const std::string& filePath);
             Model loadSkeletonModel(const std::string& name, const std::string& filePath);
+
+            // ── Font management ────────────────────────────────────
+            uint32_t loadFont(const std::string& name, const std::string& filePath, uint32_t pixelHeight = 48);
+            const FontData& getFontData(uint32_t fontId) const;
+            uint32_t getFontId(const std::string& name) const;
 
             std::vector<std::string> loadAnimations(const std::string& prefix, const std::string& filePath);
             const Animation& getAnimation(const std::string& name) const;
@@ -197,6 +228,11 @@ namespace Lca{
 
             std::vector<BufferRange> freeSkeletonVertexRanges;
             std::vector<BufferRange> freeSkeletonIndexRanges;
+
+            // ── Font data ──────────────────────────────────────────
+            std::unordered_map<std::string, uint32_t> fontMap;
+            std::unordered_map<uint32_t, FontData> fontDataStore;
+            uint32_t nextFontId{0};
             
             uint32_t allocateRange(std::vector<BufferRange>& freeList, uint32_t& currentTop, uint32_t size);
             void freeRange(std::vector<BufferRange>& freeList, uint32_t offset, uint32_t size);

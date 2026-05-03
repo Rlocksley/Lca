@@ -55,6 +55,9 @@ namespace Lca
         };
 
         Texture createTexture(uint32_t width, uint32_t height, void* pixels);
+        // Like createTexture but generates a full mip-chain on the GPU with
+        // vkCmdBlitImage so that the sampler can pick the correct LOD.
+        Texture createTextureMipmapped(uint32_t width, uint32_t height, void* pixels);
         Texture createFontTexture(uint32_t width, uint32_t height, void* pixels);
         Texture createDepthMap(uint32_t width, uint32_t height);
         void destroyTexture(Texture& texture);

@@ -15,6 +15,8 @@
 #include "Input.hpp"
 #include "Vertex.hpp"
 #include "CharacterCapsule.hpp"
+#include "NavMesh.hpp"
+#include "Navigation.hpp"
 #include "RigidBody.hpp"
 #include "BoxCollider.hpp"
 #include "Velocity.hpp"
@@ -27,6 +29,7 @@
 #include "ZoneStreamingLevel.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <iostream>
@@ -35,7 +38,457 @@
 #include <thread>
 #include <vector>
 
+#include <recastnavigation/Recast.h>
+#include <recastnavigation/DetourNavMeshBuilder.h>
+#include <recastnavigation/DetourAlloc.h>
+
 using namespace Lca;
+
+namespace {
+
+struct CityNavObstacle {
+    glm::vec3 center;
+    glm::vec3 halfExtents;
+    float yaw;
+};
+
+inline void appendTri(std::vector<int>& tris, int a, int b, int c) {
+    tris.push_back(a);
+    tris.push_back(b);
+    tris.push_back(c);
+}
+
+inline int appendVertex(std::vector<float>& verts, const glm::vec3& v) {
+    verts.push_back(v.x);
+    verts.push_back(v.y);
+    verts.push_back(v.z);
+    return static_cast<int>(verts.size() / 3u) - 1;
+}
+
+inline void appendQuad(
+    std::vector<float>& verts,
+    std::vector<int>& tris,
+    std::vector<unsigned char>& triAreas,
+    const glm::vec3& a,
+    const glm::vec3& b,
+    const glm::vec3& c,
+    const glm::vec3& d,
+    unsigned char area
+) {
+    const int ia = appendVertex(verts, a);
+    const int ib = appendVertex(verts, b);
+    const int ic = appendVertex(verts, c);
+    const int id = appendVertex(verts, d);
+    appendTri(tris, ia, ib, ic);
+    triAreas.push_back(area);
+    appendTri(tris, ia, ic, id);
+    triAreas.push_back(area);
+}
+
+inline void appendOrientedBoxObstacle(
+    std::vector<float>& verts,
+    std::vector<int>& tris,
+    std::vector<unsigned char>& triAreas,
+    const CityNavObstacle& obs
+) {
+    const float c = std::cos(obs.yaw);
+    const float s = std::sin(obs.yaw);
+
+    auto rotate = [&](const glm::vec3& p) {
+        return glm::vec3(
+            p.x * c - p.z * s,
+            p.y,
+            p.x * s + p.z * c
+        );
+    };
+
+    const glm::vec3 he = obs.halfExtents;
+
+    std::array<glm::vec3, 8> local = {
+        glm::vec3(-he.x, -he.y, -he.z),
+        glm::vec3( he.x, -he.y, -he.z),
+        glm::vec3( he.x, -he.y,  he.z),
+        glm::vec3(-he.x, -he.y,  he.z),
+        glm::vec3(-he.x,  he.y, -he.z),
+        glm::vec3( he.x,  he.y, -he.z),
+        glm::vec3( he.x,  he.y,  he.z),
+        glm::vec3(-he.x,  he.y,  he.z)
+    };
+
+    std::array<int, 8> idx{};
+    for (size_t i = 0; i < local.size(); ++i) {
+        idx[i] = appendVertex(verts, obs.center + rotate(local[i]));
+    }
+
+    constexpr unsigned char blocked = RC_NULL_AREA;
+
+    // Bottom
+    appendTri(tris, idx[0], idx[2], idx[1]); triAreas.push_back(blocked);
+    appendTri(tris, idx[0], idx[3], idx[2]); triAreas.push_back(blocked);
+
+    // Top
+    appendTri(tris, idx[4], idx[5], idx[6]); triAreas.push_back(blocked);
+    appendTri(tris, idx[4], idx[6], idx[7]); triAreas.push_back(blocked);
+
+    // Sides
+    appendTri(tris, idx[0], idx[1], idx[5]); triAreas.push_back(blocked);
+    appendTri(tris, idx[0], idx[5], idx[4]); triAreas.push_back(blocked);
+
+    appendTri(tris, idx[1], idx[2], idx[6]); triAreas.push_back(blocked);
+    appendTri(tris, idx[1], idx[6], idx[5]); triAreas.push_back(blocked);
+
+    appendTri(tris, idx[2], idx[3], idx[7]); triAreas.push_back(blocked);
+    appendTri(tris, idx[2], idx[7], idx[6]); triAreas.push_back(blocked);
+
+    appendTri(tris, idx[3], idx[0], idx[4]); triAreas.push_back(blocked);
+    appendTri(tris, idx[3], idx[4], idx[7]); triAreas.push_back(blocked);
+}
+
+inline int zoneTypeFromGrid(int col, int row) {
+    const float centreCol = (ZoneRegistry::kGridX - 1) * 0.5f;
+    const float centreRow = (ZoneRegistry::kGridZ - 1) * 0.5f;
+    const float dx = col - centreCol;
+    const float dz = row - centreRow;
+    const float dist = std::sqrt(dx * dx + dz * dz);
+    if (dist < 2.0f) return 2;
+    if (dist < 4.0f) return 1;
+    return 0;
+}
+
+// Replays the exact loadAssets() RNG sequence to recover per-variant
+// building/car half-extents without needing ZoneStreamingLevel instances.
+inline void computeZoneVariantExtents(uint32_t layoutSeed, int zoneType,
+                                      glm::vec3 bldgHE[4], glm::vec3 carHE[3]) {
+    ZoneRng rng(layoutSeed);
+
+    // 4 building variants — mirror ZoneStreamingLevel::loadAssets()
+    for (int i = 0; i < 4; ++i) {
+        float width{}, height{}, depth{}, roofHeight{};
+        switch (zoneType) {
+        case 0:
+            width      = rng.nextFloat(1.8f, 3.5f);
+            height     = rng.nextFloat(3.0f, 6.0f);
+            depth      = rng.nextFloat(1.8f, 3.5f);
+            roofHeight = rng.nextFloat(1.0f, 2.5f);
+            rng.nextInt(1, 2);   // windowRows
+            rng.nextInt(2, 3);   // windowCols
+            // hasAntenna = false (no RNG)
+            break;
+        case 1:
+            width      = rng.nextFloat(2.5f, 5.0f);
+            height     = rng.nextFloat(5.0f, 12.0f);
+            depth      = rng.nextFloat(2.5f, 5.0f);
+            roofHeight = rng.nextBool(0.3f) ? rng.nextFloat(0.5f, 1.5f) : 0.0f;
+            rng.nextInt(2, 5);   // windowRows
+            rng.nextInt(3, 5);   // windowCols
+            rng.nextBool(0.2f);  // hasAntenna
+            break;
+        case 2:
+        default:
+            width      = rng.nextFloat(2.0f, 4.5f);
+            height     = rng.nextFloat(10.0f, 30.0f);
+            depth      = rng.nextFloat(2.0f, 4.5f);
+            roofHeight = 0.0f;
+            rng.nextInt(5, 12);  // windowRows
+            rng.nextInt(3, 6);   // windowCols
+            rng.nextBool(0.4f);  // hasAntenna
+            break;
+        }
+        // varyColor(wallCol)  — 3 calls
+        rng.nextFloat(0.0f, 1.0f); rng.nextFloat(0.0f, 1.0f); rng.nextFloat(0.0f, 1.0f);
+        // roofCol — 3 calls
+        rng.nextFloat(0.0f, 1.0f); rng.nextFloat(0.0f, 1.0f); rng.nextFloat(0.0f, 1.0f);
+        // doorCol — hardcoded, 0 calls
+        // windowCol — 2 calls
+        rng.nextFloat(0.0f, 1.0f); rng.nextFloat(0.0f, 1.0f);
+
+        bldgHE[i] = glm::vec3(width, (height + roofHeight) * 0.5f, depth);
+    }
+
+    // 3 car variants — mirror ZoneStreamingLevel::loadAssets()
+    for (int i = 0; i < 3; ++i) {
+        float bodyLength{}, bodyHeight{}, bodyWidth{}, cabinHeight{};
+        switch (i) {
+        case 0: // sedan
+            bodyLength  = rng.nextFloat(1.6f, 2.2f);
+            bodyHeight  = rng.nextFloat(0.9f, 1.3f);
+            bodyWidth   = rng.nextFloat(0.8f, 1.1f);
+            rng.nextFloat(0.0f, 1.0f); // cabinStart
+            rng.nextFloat(0.0f, 1.0f); // cabinEnd
+            cabinHeight = rng.nextFloat(0.7f, 1.0f);
+            // hasBed = false
+            break;
+        case 1: // pickup
+            bodyLength  = rng.nextFloat(2.2f, 3.0f);
+            bodyHeight  = rng.nextFloat(1.1f, 1.5f);
+            bodyWidth   = rng.nextFloat(0.9f, 1.2f);
+            rng.nextFloat(0.0f, 1.0f); // cabinStart
+            rng.nextFloat(0.0f, 1.0f); // cabinEnd
+            cabinHeight = rng.nextFloat(0.8f, 1.1f);
+            // hasBed = true
+            break;
+        case 2: // van
+        default:
+            bodyLength  = rng.nextFloat(2.0f, 2.8f);
+            bodyHeight  = rng.nextFloat(1.4f, 1.8f);
+            bodyWidth   = rng.nextFloat(0.9f, 1.2f);
+            rng.nextFloat(0.0f, 1.0f); // cabinStart
+            rng.nextFloat(0.0f, 1.0f); // cabinEnd
+            cabinHeight = rng.nextFloat(0.4f, 0.7f);
+            // hasBed = false
+            break;
+        }
+        // varyColor(carCol, 0.2) — 3 calls
+        rng.nextFloat(0.0f, 1.0f); rng.nextFloat(0.0f, 1.0f); rng.nextFloat(0.0f, 1.0f);
+
+        carHE[i] = glm::vec3(bodyLength, (bodyHeight + cabinHeight) * 0.5f, bodyWidth);
+    }
+}
+
+inline bool buildCityNavigationMesh() {
+    std::vector<float> verts;
+    std::vector<int> tris;
+    std::vector<unsigned char> triAreas;
+    verts.reserve(500000);
+    tris.reserve(500000);
+    triAreas.reserve(200000);
+
+    constexpr int kBuildingVariants = 4;
+    constexpr int kCarVariants      = 3;
+
+    const float zoneW  = ZoneRegistry::kZoneCols * ZoneRegistry::kSpacing;
+    const float zoneH  = ZoneRegistry::kZoneRows * ZoneRegistry::kSpacing;
+    const float totalW = ZoneRegistry::kGridX * zoneW + (ZoneRegistry::kGridX - 1) * ZoneRegistry::kGap;
+    const float totalH = ZoneRegistry::kGridZ * zoneH + (ZoneRegistry::kGridZ - 1) * ZoneRegistry::kGap;
+    const float startX = -totalW * 0.5f;
+    const float startZ = -totalH * 0.5f;
+
+    // Ground/street surface is walkable.
+    const float pad = 20.0f;
+    const float x0 = startX - pad;
+    const float z0 = startZ - pad;
+    const float x1 = startX + totalW + pad;
+    const float z1 = startZ + totalH + pad;
+    appendQuad(
+        verts, tris, triAreas,
+        glm::vec3(x0, 0.0f, z0),
+        glm::vec3(x1, 0.0f, z0),
+        glm::vec3(x1, 0.0f, z1),
+        glm::vec3(x0, 0.0f, z1),
+        RC_WALKABLE_AREA
+    );
+
+    std::vector<CityNavObstacle> obstacles;
+    obstacles.reserve(25000);
+
+    for (int row = 0; row < ZoneRegistry::kGridZ; ++row) {
+        for (int col = 0; col < ZoneRegistry::kGridX; ++col) {
+            const float originX = startX + col * (zoneW + ZoneRegistry::kGap);
+            const float originZ = startZ + row * (zoneH + ZoneRegistry::kGap);
+            const int zoneType = zoneTypeFromGrid(col, row);
+
+            const std::string id = ZoneHelpers::zoneId(col, row);
+            const uint32_t layoutSeed = static_cast<uint32_t>(std::hash<std::string>{}(id));
+
+            // Recover per-variant half-extents (mirrors loadAssets RNG)
+            glm::vec3 bldgHE[kBuildingVariants];
+            glm::vec3 carHE[kCarVariants];
+            computeZoneVariantExtents(layoutSeed, zoneType, bldgHE, carHE);
+
+            // Placement — mirrors ZoneStreamingLevel::setupScene() RNG exactly
+            ZoneRng rng(layoutSeed + 54321u);
+
+            for (int zr = 0; zr < ZoneRegistry::kZoneRows; ++zr) {
+                for (int zc = 0; zc < ZoneRegistry::kZoneCols; ++zc) {
+                    const float cellX = originX + zc * ZoneRegistry::kSpacing;
+                    const float cellZ = originZ + zr * ZoneRegistry::kSpacing;
+
+                    int numBuildings = 1;
+                    switch (zoneType) {
+                        case 0: numBuildings = rng.nextInt(1, 2); break;
+                        case 1: numBuildings = rng.nextInt(1, 3); break;
+                        case 2: numBuildings = rng.nextInt(2, 3); break;
+                        default: break;
+                    }
+
+                    for (int b = 0; b < numBuildings; ++b) {
+                        const int variant = rng.nextInt(0, kBuildingVariants - 1);
+                        const float offX = (numBuildings == 1) ? 0.0f : rng.nextFloat(-3.0f, 3.0f);
+                        const float offZ = (numBuildings == 1) ? 0.0f : rng.nextFloat(-3.0f, 3.0f);
+                        const float yaw = rng.nextFloat(0.0f, 6.2832f);
+                        const float scale = rng.nextFloat(0.85f, 1.15f);
+
+                        obstacles.push_back({
+                            glm::vec3(cellX + offX, 0.0f, cellZ + offZ),
+                            bldgHE[variant] * scale,
+                            yaw
+                        });
+                    }
+
+                    int numCars = 0;
+                    switch (zoneType) {
+                        case 0: numCars = rng.nextInt(0, 1); break;
+                        case 1: numCars = rng.nextInt(1, 2); break;
+                        case 2: numCars = rng.nextInt(1, 3); break;
+                        default: break;
+                    }
+
+                    for (int c = 0; c < numCars; ++c) {
+                        const int variant = rng.nextInt(0, kCarVariants - 1);
+                        const float carOffX = 5.0f + rng.nextFloat(-1.0f, 1.0f);
+                        const float carOffZ = 4.5f + c * rng.nextFloat(2.5f, 4.0f);
+                        const float carYaw = rng.nextBool() ? 0.0f : 3.14159f;
+                        obstacles.push_back({
+                            glm::vec3(cellX + carOffX, 0.0f, cellZ + carOffZ),
+                            carHE[variant],
+                            carYaw
+                        });
+                    }
+
+                    // Lantern post as static obstacle volume.
+                    obstacles.push_back({
+                        glm::vec3(cellX - 4.0f, 0.0f, cellZ + 5.5f),
+                        glm::vec3(0.35f, 2.5f, 0.35f),
+                        0.0f
+                    });
+                }
+            }
+        }
+    }
+
+    for (const auto& obs : obstacles) {
+        appendOrientedBoxObstacle(verts, tris, triAreas, obs);
+    }
+
+    if (tris.empty()) {
+        std::cerr << "[Example6] Nav build failed: no triangles\n";
+        return false;
+    }
+
+    rcContext ctx;
+    rcConfig cfg{};
+    cfg.cs = 0.6f;
+    cfg.ch = 0.2f;
+    cfg.walkableSlopeAngle = 45.0f;
+    cfg.walkableHeight = static_cast<int>(std::ceil(2.0f / cfg.ch));
+    cfg.walkableClimb = static_cast<int>(std::floor(0.9f / cfg.ch));
+    cfg.walkableRadius = static_cast<int>(std::ceil(0.4f / cfg.cs));
+    cfg.maxEdgeLen = static_cast<int>(12.0f / cfg.cs);
+    cfg.maxSimplificationError = 1.3f;
+    cfg.minRegionArea = rcSqr(8);
+    cfg.mergeRegionArea = rcSqr(20);
+    cfg.maxVertsPerPoly = 6;
+    cfg.detailSampleDist = 6.0f * cfg.cs;
+    cfg.detailSampleMaxError = 1.0f * cfg.ch;
+
+    rcCalcBounds(verts.data(), static_cast<int>(verts.size() / 3u), cfg.bmin, cfg.bmax);
+    rcCalcGridSize(cfg.bmin, cfg.bmax, cfg.cs, &cfg.width, &cfg.height);
+
+    rcHeightfield* solid = rcAllocHeightfield();
+    rcCompactHeightfield* chf = nullptr;
+    rcContourSet* cset = nullptr;
+    rcPolyMesh* pmesh = nullptr;
+    rcPolyMeshDetail* dmesh = nullptr;
+
+    bool ok = rcCreateHeightfield(&ctx, *solid, cfg.width, cfg.height, cfg.bmin, cfg.bmax, cfg.cs, cfg.ch);
+    if (ok) ok = rcRasterizeTriangles(&ctx, verts.data(), static_cast<int>(verts.size() / 3u), tris.data(), triAreas.data(), static_cast<int>(triAreas.size()), *solid, cfg.walkableClimb);
+    if (ok) rcFilterLowHangingWalkableObstacles(&ctx, cfg.walkableClimb, *solid);
+    if (ok) rcFilterLedgeSpans(&ctx, cfg.walkableHeight, cfg.walkableClimb, *solid);
+    if (ok) rcFilterWalkableLowHeightSpans(&ctx, cfg.walkableHeight, *solid);
+
+    if (ok) {
+        chf = rcAllocCompactHeightfield();
+        ok = chf && rcBuildCompactHeightfield(&ctx, cfg.walkableHeight, cfg.walkableClimb, *solid, *chf);
+    }
+    if (ok) ok = rcErodeWalkableArea(&ctx, cfg.walkableRadius, *chf);
+    if (ok) ok = rcBuildDistanceField(&ctx, *chf);
+    if (ok) ok = rcBuildRegions(&ctx, *chf, 0, cfg.minRegionArea, cfg.mergeRegionArea);
+
+    if (ok) {
+        cset = rcAllocContourSet();
+        ok = cset && rcBuildContours(&ctx, *chf, cfg.maxSimplificationError, cfg.maxEdgeLen, *cset);
+    }
+    if (ok) {
+        pmesh = rcAllocPolyMesh();
+        ok = pmesh && rcBuildPolyMesh(&ctx, *cset, cfg.maxVertsPerPoly, *pmesh);
+    }
+    if (ok) {
+        dmesh = rcAllocPolyMeshDetail();
+        ok = dmesh && rcBuildPolyMeshDetail(&ctx, *pmesh, *chf, cfg.detailSampleDist, cfg.detailSampleMaxError, *dmesh);
+    }
+
+    unsigned char* navData = nullptr;
+    int navDataSize = 0;
+    if (ok && pmesh->npolys > 0) {
+        for (int i = 0; i < pmesh->npolys; ++i) {
+            pmesh->flags[i] = (pmesh->areas[i] == RC_WALKABLE_AREA) ? 1 : 0;
+        }
+
+        dtNavMeshCreateParams params{};
+        params.verts = pmesh->verts;
+        params.vertCount = pmesh->nverts;
+        params.polys = pmesh->polys;
+        params.polyAreas = pmesh->areas;
+        params.polyFlags = pmesh->flags;
+        params.polyCount = pmesh->npolys;
+        params.nvp = pmesh->nvp;
+        params.detailMeshes = dmesh->meshes;
+        params.detailVerts = dmesh->verts;
+        params.detailVertsCount = dmesh->nverts;
+        params.detailTris = dmesh->tris;
+        params.detailTriCount = dmesh->ntris;
+        params.walkableHeight = 2.0f;
+        params.walkableRadius = 0.4f;
+        params.walkableClimb = 0.9f;
+        rcVcopy(params.bmin, pmesh->bmin);
+        rcVcopy(params.bmax, pmesh->bmax);
+        params.cs = cfg.cs;
+        params.ch = cfg.ch;
+        params.buildBvTree = true;
+
+        ok = dtCreateNavMeshData(&params, &navData, &navDataSize);
+    }
+
+    if (!ok || !navData || navDataSize <= 0) {
+        if (navData) {
+            dtFree(navData);
+        }
+        if (dmesh) rcFreePolyMeshDetail(dmesh);
+        if (pmesh) rcFreePolyMesh(pmesh);
+        if (cset) rcFreeContourSet(cset);
+        if (chf) rcFreeCompactHeightfield(chf);
+        if (solid) rcFreeHeightField(solid);
+        std::cerr << "[Example6] Nav build failed during Recast/Detour pipeline\n";
+        return false;
+    }
+
+    dtNavMeshParams navParams{};
+    rcVcopy(navParams.orig, pmesh->bmin);
+    navParams.tileWidth = cfg.bmax[0] - cfg.bmin[0];
+    navParams.tileHeight = cfg.bmax[2] - cfg.bmin[2];
+    navParams.maxTiles = 1;
+    navParams.maxPolys = 1 << 15;
+
+    auto& nav = Core::GetNavigation();
+    nav.init(65535);
+    const bool loadOk = nav.loadSingleTile(navParams, navData, navDataSize, DT_TILE_FREE_DATA);
+
+    if (dmesh) rcFreePolyMeshDetail(dmesh);
+    if (pmesh) rcFreePolyMesh(pmesh);
+    if (cset) rcFreeContourSet(cset);
+    if (chf) rcFreeCompactHeightfield(chf);
+    if (solid) rcFreeHeightField(solid);
+
+    if (!loadOk) {
+        std::cerr << "[Example6] Nav load failed\n";
+        return false;
+    }
+
+    std::cout << "[Example6] Built navmesh from ground/houses/cars/lanterns. Triangles=" << (tris.size() / 3) << ", Obstacles=" << obstacles.size() << "\n";
+    return true;
+}
+
+} // namespace
 
 class CityLevel : public Lca::Level {
 public:
@@ -297,6 +750,11 @@ public:
                 .intensity = 2.0f,
             });
 
+        const bool navMeshReady = buildCityNavigationMesh();
+        if (!navMeshReady) {
+            std::cout << "[Example6] Warning: navmesh unavailable, NPC navigation disabled fallback behavior.\n";
+        }
+
         // ── Spawn 500 NPC wizards that wander the city ────────
         {
             constexpr int kNpcCount = 500;
@@ -347,14 +805,24 @@ public:
 
             ZoneRng npcRng(42u);
             for (int i = 0; i < kNpcCount; ++i) {
-                // Spread NPCs across the whole city (roughly +-200 units)
-                float nx = npcRng.nextFloat(-200.0f, 200.0f);
-                float nz = npcRng.nextFloat(-200.0f, 200.0f);
+                // Spawn around the player's starting area (city center near origin).
+                const float angle = npcRng.nextFloat(0.0f, 6.2832f);
+                const float radius = npcRng.nextFloat(12.0f, 75.0f);
+                float nx = std::cos(angle) * radius;
+                float nz = std::sin(angle) * radius;
+                glm::vec3 spawnPos(nx, npcCenterY, nz);
+                if (navMeshReady) {
+                    glm::vec3 projected;
+                    if (Core::GetNavigation().projectPointToNav(spawnPos, glm::vec3(2.0f, 4.0f, 2.0f), projected)) {
+                        spawnPos = projected;
+                        spawnPos.y = npcCenterY;
+                    }
+                }
 
                 std::string npcName = "NPC_" + std::to_string(i);
                 auto npc = world.entity(npcName.c_str());
                 npc.set(Component::Transform{
-                    glm::vec3(nx, npcCenterY, nz),
+                    spawnPos,
                     0.0f, glm::vec3(0,1,0), glm::vec3(1.0f)});
                 npc.set(Component::MeshTransform{Component::Transform{
                     glm::vec3(0.0f, npcMeshYOff, 0.0f),
@@ -384,6 +852,21 @@ public:
                     .speedDecrement = 4.0f
                 });
 
+                npc.set<Component::NavAgent>({
+                    .projectionHalfExtents = glm::vec3(2.0f, 4.0f, 2.0f),
+                    .repathInterval = 0.35f,
+                    .cornerReachDistance = 1.0f,
+                    .maxSpeed = 2.5f,
+                    .repathTimer = 0.0f,
+                    .requestRepath = true
+                });
+                npc.set<Component::NavTarget>({
+                    .worldPos = spawnPos,
+                    .active = false
+                });
+                npc.set<Component::NavPath>({});
+                npc.set<Component::NavSteering>({});
+
                 // Animation
                 npc.set(buildNpcASM());
 
@@ -392,12 +875,7 @@ public:
                     NpcController ctrl;
                     ctrl.rng = static_cast<uint32_t>(i * 7919u + 12345u);
                     ctrl.preferredPace = npcRng.nextFloat(0.25f, 0.75f);
-                    // Start walking immediately toward a nearby waypoint
-                    ctrl.idleTimer = npcRng.nextFloat(0.0f, 3.0f);
-                    ctrl.waypoint = glm::vec3(
-                        nx + npcRng.nextFloat(-30.0f, 30.0f),
-                        npcCenterY,
-                        nz + npcRng.nextFloat(-30.0f, 30.0f));
+                    ctrl.idleTimer = npcRng.nextFloat(0.0f, 2.0f);
                     npc.set(ctrl);
                 }
             }
@@ -406,16 +884,19 @@ public:
         }
 
         // ── NPC Controller system ─────────────────────────────
-        world.system<NpcController, Component::CharacterCapsule,
-                     Component::AnimationStateMachine, const Component::Transform>(
-            "NPC Controller Update")
+        world.system<NpcController, Component::NavAgent, Component::NavTarget,
+                 const Component::NavSteering, Component::CharacterCapsule,
+                 Component::AnimationStateMachine, const Component::Transform>(
+            "NPC Nav Controller Update")
             .kind(flecs::PreUpdate)
-            .multi_threaded()
             .each([](flecs::entity e, NpcController& ctrl,
+                 Component::NavAgent& navAgent,
+                 Component::NavTarget& navTarget,
+                 const Component::NavSteering& navSteering,
                      Component::CharacterCapsule& capsule,
                      Component::AnimationStateMachine& asm_,
                      const Component::Transform& tf) {
-                ctrl.update(capsule, asm_, tf);
+            ctrl.update(tf, navAgent, navTarget, navSteering, capsule, asm_, Core::GetNavigation().isInitialized());
             });
 
         // ── Register the zone registry singleton and build 10x10 zones ──

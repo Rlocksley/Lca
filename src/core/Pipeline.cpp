@@ -9,6 +9,39 @@ namespace Lca {
 
         Pipeline::Pipeline() {}
 
+        Pipeline::Pipeline(Pipeline&& other) noexcept
+            : descriptorResources(std::move(other.descriptorResources)),
+              pushConstantRanges(std::move(other.pushConstantRanges)),
+              descriptorSetLayout(other.descriptorSetLayout),
+              descriptorSets(other.descriptorSets),
+              pipelineLayout(other.pipelineLayout),
+              pipeline(other.pipeline) {
+            other.descriptorSetLayout = VK_NULL_HANDLE;
+            other.descriptorSets.fill(VK_NULL_HANDLE);
+            other.pipelineLayout = VK_NULL_HANDLE;
+            other.pipeline = VK_NULL_HANDLE;
+        }
+
+        Pipeline& Pipeline::operator=(Pipeline&& other) noexcept {
+            if (this != &other) {
+                destroyOwnedVulkanObjects();
+
+                descriptorResources = std::move(other.descriptorResources);
+                pushConstantRanges = std::move(other.pushConstantRanges);
+
+                descriptorSetLayout = other.descriptorSetLayout;
+                descriptorSets = other.descriptorSets;
+                pipelineLayout = other.pipelineLayout;
+                pipeline = other.pipeline;
+
+                other.descriptorSetLayout = VK_NULL_HANDLE;
+                other.descriptorSets.fill(VK_NULL_HANDLE);
+                other.pipelineLayout = VK_NULL_HANDLE;
+                other.pipeline = VK_NULL_HANDLE;
+            }
+            return *this;
+        }
+
         Pipeline::~Pipeline() {
             destroyOwnedVulkanObjects();
         }

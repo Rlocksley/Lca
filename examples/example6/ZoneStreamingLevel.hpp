@@ -377,6 +377,8 @@ public:
                         0.0f, glm::vec3(0,1,0), glm::vec3(1.0f)});
                     parent.add<Component::TransformID>();
                     parent.add<Component::Static>();
+                    parent.set<Component::BoxCollider>({ glm::vec3(0.35f, 2.5f, 0.35f) });
+                    parent.set<Component::StaticRigidBody>({ .objectLayer = Layers::STATIC_ENVIRONMENT, .friction = 0.8f, .restitution = 0.0f });
                     track(parent);
 
                     auto mesh = world.entity();

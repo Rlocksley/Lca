@@ -17,6 +17,8 @@
 #include "BoxCollider.hpp"
 #include "Velocity.hpp"
 #include "Shape.hpp"
+#include "ParticleSystem.hpp"
+#include "Hidden.hpp"
 
 #include <string>
 #include <vector>
@@ -107,12 +109,121 @@ namespace ProceduralTex {
 } // namespace ProceduralTex
 
 // ──────────────────────────────────────────────────────────────
+// Procedural fire sprite generator (from example9)
+// ──────────────────────────────────────────────────────────────
+namespace ProceduralFireTex {
+
+    static const float kPi = 3.14159265359f;
+
+    inline float hash(float x, float y) {
+        float v = std::sin(x * 127.1f + y * 311.7f) * 43758.5453f;
+        return v - std::floor(v);
+    }
+    inline float noise(float x, float y) {
+        float ix = std::floor(x), iy = std::floor(y);
+        float fx = x - ix,        fy = y - iy;
+        float a = hash(ix,       iy);
+        float b = hash(ix + 1.f, iy);
+        float c = hash(ix,       iy + 1.f);
+        float d = hash(ix + 1.f, iy + 1.f);
+        float ux = fx * fx * (3.f - 2.f * fx);
+        float uy = fy * fy * (3.f - 2.f * fy);
+        return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
+    }
+    inline float fbm(float x, float y, int octaves = 5) {
+        float val = 0.f, amp = 0.5f;
+        for (int i = 0; i < octaves; ++i) {
+            val += amp * noise(x, y);
+            x *= 2.f; y *= 2.f;
+            amp *= 0.5f;
+        }
+        return val;
+    }
+    inline uint8_t clamp8(float v) {
+        int i = static_cast<int>(v * 255.f);
+        return static_cast<uint8_t>(i < 0 ? 0 : (i > 255 ? 255 : i));
+    }
+
+    inline std::vector<uint32_t> generateFireSprite(int w, int h, float seed) {
+        std::vector<uint32_t> pixels(w * h);
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(w) * 2.f - 1.f;
+                float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(h) * 2.f - 1.f;
+                float y01 = (v + 1.0f) * 0.5f;
+
+                float flow = fbm((u + seed * 0.7f) * 2.6f, (y01 + seed * 0.3f) * 3.4f, 4);
+                float detail = fbm((u + seed * 1.9f) * 7.8f, (y01 + seed * 0.9f) * 11.2f, 3);
+
+                float baseWidth = 0.70f;
+                float tipWidth  = 0.12f;
+                float width = baseWidth + (tipWidth - baseWidth) * y01;
+
+                float swayAmp = 0.06f + y01 * 0.18f;
+                float displacedU = u + (flow - 0.5f) * swayAmp;
+
+                float coreDist = std::fabs(displacedU) / (width + 1e-4f);
+
+                float ang = std::atan2(v, displacedU + 1e-5f);
+                float tongues = std::sin(ang * 6.0f + detail * kPi * 2.0f) * 0.08f;
+                coreDist += tongues * (0.2f + y01 * 0.8f);
+
+                float verticalShape = 1.0f - y01 * y01 * 0.85f;
+                verticalShape = verticalShape < 0.0f ? 0.0f : verticalShape;
+
+                float body = 1.0f - coreDist;
+                body = body < 0.0f ? 0.0f : (body > 1.0f ? 1.0f : body);
+                body = body * body * (3.0f - 2.0f * body);
+                float breakup = (detail - 0.5f) * (0.16f + y01 * 0.14f);
+                float alpha = body * verticalShape + breakup;
+
+                float rr = std::sqrt(u * u + v * v);
+                float cornerFade = 1.0f - (rr - 0.65f) / 0.55f;
+                cornerFade = cornerFade < 0.0f ? 0.0f : (cornerFade > 1.0f ? 1.0f : cornerFade);
+                alpha *= cornerFade;
+                alpha = alpha < 0.0f ? 0.0f : (alpha > 1.0f ? 1.0f : alpha);
+
+                float hotCore = 1.0f - coreDist * 1.65f;
+                hotCore = hotCore < 0.0f ? 0.0f : (hotCore > 1.0f ? 1.0f : hotCore);
+                float baseBoost = 1.0f - y01;
+                float heat = hotCore * (0.55f + baseBoost * 0.65f) + (flow - 0.5f) * 0.12f;
+                heat = heat < 0.0f ? 0.0f : (heat > 1.0f ? 1.0f : heat);
+                heat *= alpha;
+
+                uint32_t px =
+                    (static_cast<uint32_t>(clamp8(alpha)) << 24) |
+                    (static_cast<uint32_t>(clamp8(heat))  << 16) |
+                    (static_cast<uint32_t>(clamp8(heat))  <<  8) |
+                     static_cast<uint32_t>(clamp8(heat));
+                pixels[y * w + x] = px;
+            }
+        }
+        return pixels;
+    }
+
+} // namespace ProceduralFireTex
+
+// ──────────────────────────────────────────────────────────────
+// Fireball — a sphere with a particle system that flies forward
+// and despawns after a set lifetime.
+// ──────────────────────────────────────────────────────────────
+
+struct Fireball {
+    glm::vec3 direction{0.0f, 0.0f, 1.0f};
+    float     speed{15.0f};
+    float     lifetime{4.0f};
+    float     sphereScale{0.3f};
+    float     delayTime{0.5f};   // seconds after Attack starts before spawning
+};
+
+// ──────────────────────────────────────────────────────────────
 // CharacterController — reads input, drives the Jolt
 // CharacterCapsule and the AnimationStateMachine blend param.
 // ──────────────────────────────────────────────────────────────
 
 struct CharacterController {
     bool  jumpHeld     = false;
+    bool  wantsFireball = false;
 
     void update(Component::CharacterCapsule& capsule,
                 Component::AnimationStateMachine& stateMachine)
@@ -159,6 +270,7 @@ struct CharacterController {
         // ── Attack on left mouse button ───────────────────────
         if (Input::buttonLeft.down && stateMachine.currentStateName != "Attack") {
             stateMachine.setCurrentState("Attack");
+            wantsFireball = true;
         }
     }
 };
@@ -366,10 +478,10 @@ public:
                 "Torso", "Neck", "Head",
                 "Shoulder.L", "UpperArm.L", "LowerArm.L", "Fist.L",
                 "Shoulder.R", "UpperArm.R", "LowerArm.R", "Fist.R",
-                "mixamorig:Spine1", "mixamorig:Spine2",
-                "mixamorig:Neck", "mixamorig:Head",
-                "mixamorig:LeftShoulder",  "mixamorig:LeftArm",  "mixamorig:LeftForeArm",  "mixamorig:LeftHand",
-                "mixamorig:RightShoulder", "mixamorig:RightArm", "mixamorig:RightForeArm", "mixamorig:RightHand"
+                "Spine1", "Spine2",
+                "Neck", "Head",
+                "LeftShoulder",  "LeftArm",  "LeftForeArm",  "LeftHand",
+                "RightShoulder", "RightArm", "RightForeArm", "RightHand"
             };
             for (const auto& boneName : upperBoneNames) {
                 auto it = skelData.nodeNameToIndex.find(boneName);
@@ -401,6 +513,19 @@ public:
         player.set(asm_);
         player.set<CharacterController>({});
 
+        // ── Fireball pipeline IDs (registered in App::onInit) ──
+        const uint32_t fbCompID = ren.getParticleSystemCompId("fireballSim");
+        const uint32_t fbGfxID  = ren.getParticleSystemPipelineId("fireballGfx");
+        const uint32_t fbSquareMeshID = am.getMeshId("fireballSquare");
+        const uint32_t fbSphereMeshID = am.getMeshId("fireballSphere");
+        const uint32_t fbMatID        = am.getMaterialId("fireballMat");
+        const uint32_t fbSphereMatID  = am.getMaterialId("fireballSphereMat");
+
+        // ── Ember pipeline IDs ─────────────────────────────────
+        const uint32_t emberCompID = ren.getParticleSystemCompId("fireballEmberSim");
+        const uint32_t emberGfxID  = ren.getParticleSystemPipelineId("fireballEmberGfx");
+        const uint32_t emberMatID  = am.getMaterialId("fireballEmberMat");
+
         // ── Character control system ──────────────────────────
         world.system<CharacterController, Component::CharacterCapsule, Component::AnimationStateMachine>(
             "Character Controller Update")
@@ -408,6 +533,113 @@ public:
             .each([](CharacterController& ctrl, Component::CharacterCapsule& capsule,
                      Component::AnimationStateMachine& asm_) {
                 ctrl.update(capsule, asm_);
+            });
+
+        // ── Fireball spawning system ──────────────────────────
+        // When the character controller sets wantsFireball, spawn a fireball
+        // entity in front of the player and launch it forward.
+        static int fireballCounter = 0;
+
+        world.system<CharacterController, const Component::CharacterCapsule, const Component::Transform>(
+            "Fireball Spawn System")
+            .kind(flecs::PreUpdate)
+            .each([&world, meshPipelineId, fbCompID, fbGfxID, fbSquareMeshID,
+                   fbSphereMeshID, fbMatID, fbSphereMatID,
+                   emberCompID, emberGfxID, emberMatID](
+                      flecs::entity playerEnt,
+                      CharacterController& ctrl,
+                      const Component::CharacterCapsule& capsule,
+                      const Component::Transform& transform)
+            {
+                if (!ctrl.wantsFireball) return;
+                ctrl.wantsFireball = false;
+
+                // Compute forward direction from capsule rotation
+                JPH::Vec3 fwdJolt = capsule.rotation * JPH::Vec3(0.0f, 0.0f, 1.0f);
+                glm::vec3 forward(fwdJolt.GetX(), 0.0f, fwdJolt.GetZ());
+                if (glm::length(forward) > 0.001f) forward = glm::normalize(forward);
+                else forward = glm::vec3(0.0f, 0.0f, 1.0f);
+
+                // Spawn position: in front of the player at chest height
+                glm::vec3 spawnPos = transform.position + forward * 1.5f + glm::vec3(0.0f, 1.0f, 0.0f);
+
+                int id = fireballCounter++;
+                std::string fbName = "Fireball_" + std::to_string(id);
+
+                // Parent entity with Transform + Fireball (visuals spawn after delayTime)
+                auto fbEntity = world.entity(fbName.c_str());
+                fbEntity.set(Component::Transform{spawnPos, 0.0f, glm::vec3(0,1,0), glm::vec3(1.0f)});
+                fbEntity.add<Component::TransformID>();
+                fbEntity.set<Fireball>({ .direction = forward, .speed = 15.0f, .lifetime = 4.0f, .sphereScale = 0.7f, .delayTime = 1.0f });
+                fbEntity.add<Component::Hidden>();
+            });
+
+        // ── Fireball activate system (spawns visuals after delayTime) ──
+        world.system<Fireball, Component::Transform>(
+            "Fireball Activate System")
+            .kind(flecs::OnUpdate)
+            .each([&world, meshPipelineId, fbCompID, fbGfxID, fbSquareMeshID,
+                   fbSphereMeshID, fbMatID, fbSphereMatID,
+                   emberCompID, emberGfxID, emberMatID](
+                      flecs::entity e, Fireball& fb, Component::Transform& transform)
+            {
+                if (fb.delayTime <= 0.0f) return;
+
+                fb.delayTime -= Time::deltaTime;
+                if (fb.delayTime > 0.0f) return;
+
+                // Delay expired — spawn visual children and unhide
+                e.remove<Component::Hidden>();
+
+                const std::string fbName(e.name().c_str());
+
+                // Visible sphere mesh (the fireball core)
+                auto sphereChild = world.entity((fbName + "_Sphere").c_str());
+                sphereChild.add(flecs::ChildOf, e);
+                sphereChild.set<Component::Mesh>({
+                    fbSphereMeshID,
+                    fbSphereMatID,
+                    meshPipelineId
+                });
+
+                // Main fire particle system (core + flame + wisp tiers)
+                auto fireChild = world.entity((fbName + "_Fire").c_str());
+                fireChild.add(flecs::ChildOf, e);
+                fireChild.set<Component::ParticleSystem>({
+                    .meshID              = fbSquareMeshID,
+                    .materialID          = fbMatID,
+                    .computePipelineID   = fbCompID,
+                    .graphicsPipelineID  = fbGfxID,
+                    .particleCount       = 2048,
+                    .boundingSphereRadius= 4.0f,
+                    .localOffset         = glm::mat4(1.0f)
+                });
+
+                // Ember / spark particle system
+                auto emberChild = world.entity((fbName + "_Embers").c_str());
+                emberChild.add(flecs::ChildOf, e);
+                emberChild.set<Component::ParticleSystem>({
+                    .meshID              = fbSquareMeshID,
+                    .materialID          = emberMatID,
+                    .computePipelineID   = emberCompID,
+                    .graphicsPipelineID  = emberGfxID,
+                    .particleCount       = 512,
+                    .boundingSphereRadius= 5.0f,
+                    .localOffset         = glm::mat4(1.0f)
+                });
+            });
+
+        // ── Fireball movement + lifetime system ───────────────
+        world.system<Fireball, Component::Transform>(
+            "Fireball Movement System")
+            .kind(flecs::OnUpdate)
+            .each([](flecs::entity e, Fireball& fb, Component::Transform& transform) {
+                if (fb.delayTime > 0.0f) return; // still waiting
+                transform.position += fb.direction * fb.speed * Time::deltaTime;
+                fb.lifetime -= Time::deltaTime;
+                if (fb.lifetime <= 0.0f) {
+                    e.destruct();
+                }
             });
 
         // ── Camera following the player ───────────────────────

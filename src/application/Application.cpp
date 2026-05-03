@@ -1,10 +1,12 @@
 #include "Application.hpp"
+#include "Level.hpp"
 #include "Time.hpp"
 #include "Input.hpp"
 #include "Mesh.hpp"
 #include "Hidden.hpp"
 #include "Persistent.hpp"
 #include "Device.hpp"
+#include "Mutex.hpp"
 #include <iostream>
 #include <condition_variable>
 #include <chrono>
@@ -37,6 +39,12 @@ Application::~Application() {
         loadingThread.join();
     }
     vkDeviceWaitIdle(Core::vkDevice);
+
+    // Destroy the entire flecs world (fires all OnRemove observers, freeing
+    // GPU slots) before the renderer shuts down its buffers.
+    world.~world();
+    new (&world) flecs::world(0, nullptr);  // leave in a valid-but-empty state
+
     Core::GetRenderer().shutdown();
     Core::GetAssetManager().shutdown();
     Core::destroyCore();
@@ -180,7 +188,7 @@ void Application::run() {
 
             // Wait for the GPU to finish all submitted work before
             // destroying any Vulkan resources (buffers, pipelines, etc.)
-            vkDeviceWaitIdle(Core::vkDevice);
+            LCA_VK_MUTEX(vkDeviceWaitIdle(Core::vkDevice);)
             
             {
                 std::lock_guard<std::recursive_mutex> lock(worldMutex);
@@ -238,7 +246,7 @@ void Application::run() {
                     // Both stream-ins (new GPU resources) and stream-outs
                     // (destroying textures/buffers) require the GPU to be
                     // idle before modifying or freeing Vulkan resources.
-                    vkDeviceWaitIdle(Core::vkDevice);
+                    LCA_VK_MUTEX(vkDeviceWaitIdle(Core::vkDevice);)
                     std::lock_guard<std::recursive_mutex> wlock(worldMutex);
                     processStreaming();
                 }

@@ -42,6 +42,8 @@ namespace Lca{
 
             public:
                 GraphicsPipeline(const GraphicsPipelineConfig& config);
+                GraphicsPipeline(GraphicsPipeline&&) noexcept = default;
+                GraphicsPipeline& operator=(GraphicsPipeline&&) noexcept = default;
                 virtual ~GraphicsPipeline() override = default;
                 
                 virtual void build() override;

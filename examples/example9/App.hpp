@@ -18,6 +18,7 @@
 // Registers pipelines:
 //   "basic"          — mesh_pbr.vert / mesh_pbr.frag   (floor + emitter cube)
 //   "particlePBR"    — particle_pbr.vert / frag         (spark draw)
+//   "particleGlow"   — particle_pbr.vert / particle_glow.frag (blue cube glow draw)
 //   "particleSim"    — particle_sim.comp                (spark simulation)
 //   "particleFireGfx"— particle_fire.vert / frag        (fire billboard draw)
 //   "particleFireSim"— particle_fire.comp               (fire simulation)
@@ -56,6 +57,15 @@ protected:
         particleCfg.fragmentShader = "shader/particle_pbr.frag.spv";
         Core::ParticleSystemPipeline particlePipeline(particleCfg);
         Core::GetRenderer().addParticleSystemPipeline("particlePBR", std::move(particlePipeline));
+
+        // ── Blue glow particle graphics pipeline (cube particles) ───────────
+        Core::GraphicsPipelineConfig glowCfg{};
+        glowCfg.vertexShader    = "shader/particle_pbr.vert.spv";
+        glowCfg.fragmentShader  = "shader/particle_glow.frag.spv";
+        glowCfg.cullMode        = VK_CULL_MODE_NONE;
+        glowCfg.depthWriteEnable = false;
+        Core::ParticleSystemPipeline glowPipeline(glowCfg);
+        Core::GetRenderer().addParticleSystemPipeline("particleGlow", std::move(glowPipeline));
 
         // ── Fire particle compute pipeline ────────────────────────────────────
         Core::ParticleSystemCompPipeline fireSimPipeline("shader/particle_fire.comp.spv");
@@ -98,6 +108,13 @@ protected:
         particleMat.roughness = 0.3f;
         particleMat.textureId = -1;
         Core::GetAssetManager().addMaterial("particleMat", particleMat);
+
+        // Blue glow cube material — darker base with sharper highlights
+        Core::Material particleGlowMat{};
+        particleGlowMat.metallic  = 0.1f;
+        particleGlowMat.roughness = 0.2f;
+        particleGlowMat.textureId = -1;
+        Core::GetAssetManager().addMaterial("particleGlowMat", particleGlowMat);
 
         // Fire particle material — uses the procedural fire sprite texture
         Core::Material fireMat{};

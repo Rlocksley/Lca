@@ -19,14 +19,14 @@ public:
         // ── Pipelines are registered in App::onInit, just need IDs here ──────
         const uint32_t meshPipeID = Core::GetRenderer().getMeshPipelineId("basic");
         const uint32_t particleCompID  = Core::GetRenderer().getParticleSystemCompId("particleSim");
-        const uint32_t particleGfxID   = Core::GetRenderer().getParticleSystemPipelineId("particlePBR");
+        const uint32_t particleGfxID   = Core::GetRenderer().getParticleSystemPipelineId("particleGlow");
         const uint32_t fireCompID      = Core::GetRenderer().getParticleSystemCompId("particleFireSim");
         const uint32_t fireGfxID       = Core::GetRenderer().getParticleSystemPipelineId("particleFireGfx");
 
         const uint32_t cubeMeshID    = Core::GetAssetManager().getMeshId("cube");
         const uint32_t squareMeshID  = Core::GetAssetManager().getMeshId("square");
         const uint32_t floorMatID    = Core::GetAssetManager().getMaterialId("floorMat");
-        const uint32_t particleMatID = Core::GetAssetManager().getMaterialId("particleMat");
+        const uint32_t particleMatID = Core::GetAssetManager().getMaterialId("particleGlowMat");
         const uint32_t fireMatID     = Core::GetAssetManager().getMaterialId("fireMat");
 
         // ── Flying camera ────────────────────────────────────────────────────
@@ -83,12 +83,12 @@ public:
             emitter.add<Component::TransformID>();
 
             // Optional: show a small reference cube at the emitter origin
-            auto emitterVis = world.entity("EmitterVis").add(flecs::ChildOf, emitter);
-            emitterVis.set<Component::Mesh>({
-                cubeMeshID,
-                floorMatID,
-                meshPipeID
-            });
+            // auto emitterVis = world.entity("EmitterVis").add(flecs::ChildOf, emitter);
+            // emitterVis.set<Component::Mesh>({
+            //     cubeMeshID,
+            //     floorMatID,
+            //     meshPipeID
+            // });
 
             // ── Particle system child ─────────────────────────────────────────
             // particleOffset, indexCount etc. are filled by addParticleSystem();
@@ -106,6 +106,7 @@ public:
         }
 
         // ── Fire emitter (billboard fire particle system) ─────────────────────
+        // Spawned after the cube system so fire renders as the second layer.
         {
             auto fireEmitter = world.entity("FireEmitter");
             fireEmitter.set<Component::Transform>({

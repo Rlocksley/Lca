@@ -37,7 +37,6 @@ namespace Lca
             }
 
             glfwSetInputMode(pGLFWwindow, GLFW_STICKY_KEYS, GLFW_TRUE);
-            glfwSetInputMode(pGLFWwindow, GLFW_STICKY_MOUSE_BUTTONS, GLFW_TRUE);
 
             #ifdef LCA_DEBUG
             LCA_LOGI("Window", "created", "")

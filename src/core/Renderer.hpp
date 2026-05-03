@@ -16,6 +16,8 @@
 #include "SkeletonDepthPipeline.hpp"
 #include "SkeletonCullPipeline.hpp"
 #include "LightCullPipeline.hpp"
+#include "TextPipeline.hpp"
+#include "GuiRectPipeline.hpp"
 #include <mutex>
 
 namespace Lca {
@@ -44,6 +46,10 @@ namespace Lca {
         // Maximum number of distinct particle graphics pipelines.
         // Each pipeline gets its own per-slot indirect buffer written by the cull shader.
         const inline uint32_t MAX_PARTICLE_GFX_PIPELINES     = 64;
+
+        // ── Text rendering constants ──────────────────────────────
+        const inline uint32_t MAX_TEXT_LETTERS     = 65536 * 64;
+        const inline uint32_t MAX_TEXT_PIPELINES   = 16;
 
         struct Camera{
             glm::vec4 frustumPlanes[6];
@@ -155,6 +161,47 @@ namespace Lca {
         struct ParticleDeltaTimeUniform {
             float deltaTime;
             float _pad[3];
+        };
+
+        // ── GUI Rect instance data ─────────────────────────────────
+        const inline uint32_t MAX_GUI_RECTS = 4096;
+        const inline uint32_t MAX_GUI_RECT_PIPELINES = 4;
+
+        struct GuiRectModel {
+            glm::vec4 rect{0.0f};           // x, y, width, height (pixels)
+            glm::vec4 params{0.0f};         // x = borderWidth, y = cornerRadius, z = materialId (float bits), w = borderMaterialId (float bits)
+            glm::vec4 clipRect{0.0f, 0.0f, 99999.0f, 99999.0f}; // minX, minY, maxX, maxY (screen pixels)
+            uint32_t baseTransformID{0};
+            uint32_t _pad[3]{0, 0, 0};
+        };
+
+        struct GuiRectInstance {
+            glm::vec4 rect{0.0f};           // x, y, width, height (pixels, local to parent)
+            glm::vec4 clipRect{0.0f, 0.0f, 99999.0f, 99999.0f}; // minX, minY, maxX, maxY (screen pixels)
+            float borderWidth{0.0f};
+            float cornerRadius{0.0f};
+            int32_t materialId{-1};         // fill: -1 = white, >= 0 = material texture
+            int32_t borderMaterialId{-1};   // border: -1 = no border, >= 0 = material texture
+            uint32_t pipelineID{0};
+            uint32_t transformID{0};         // parent ModelMatrix ID
+        };
+
+        // ── Text instance data ────────────────────────────────────
+        struct TextModel {
+            glm::mat4 localTransform{glm::mat4(1.0f)};
+            glm::vec4 clipRect{0.0f, 0.0f, 99999.0f, 99999.0f}; // minX, minY, maxX, maxY (screen pixels)
+            uint32_t baseTransformID{0};
+            uint32_t materialId{0};
+            uint32_t _pad[2]{0, 0};
+        };
+
+        struct TextInstance {
+            std::string text;
+            uint32_t fontID;
+            uint32_t pipelineID;
+            uint32_t transformID{0};
+            glm::mat4 localTransform{glm::mat4(1.0f)};
+            glm::vec4 clipRect{0.0f, 0.0f, 99999.0f, 99999.0f}; // minX, minY, maxX, maxY (screen pixels)
         };
 
         class Renderer{
@@ -282,6 +329,29 @@ namespace Lca {
             // Written by cull shader; read by sim shader via gl_WorkGroupID.x.
             const Buffer getParticleDispatchTableBuffer()  const { return particleDispatchTableBuffer; }
         
+            // ── Text rendering ─────────────────────────────────────
+            uint32_t addTextPipeline(const std::string& name, TextPipeline&& pipeline);
+            uint32_t getTextPipelineId(const std::string& name) const;
+            uint32_t addTextInstance(const TextInstance& instance, uint32_t maxLetters);
+            void     updateTextInstance(uint32_t id, const TextInstance& instance);
+            void     removeTextInstance(uint32_t id);
+            const Buffer getTextModelBuffer(uint32_t frameIndex) const { return textModelsGPU[frameIndex].buffer; }
+
+            // ── GUI Text rendering (2D overlay) ────────────────────
+            uint32_t addGuiTextPipeline(const std::string& name, TextPipeline&& pipeline);
+            uint32_t getGuiTextPipelineId(const std::string& name) const;
+            uint32_t addGuiTextInstance(const TextInstance& instance, uint32_t maxLetters);
+            void     updateGuiTextInstance(uint32_t id, const TextInstance& instance);
+            void     removeGuiTextInstance(uint32_t id);
+
+            // ── GUI Rect rendering (2D overlay) ────────────────────
+            uint32_t addGuiRectPipeline(const std::string& name, GuiRectPipeline&& pipeline);
+            uint32_t getGuiRectPipelineId(const std::string& name) const;
+            uint32_t addGuiRectInstance(const GuiRectInstance& instance);
+            void     updateGuiRectInstance(uint32_t id, const GuiRectInstance& instance);
+            void     removeGuiRectInstance(uint32_t id);
+            const Buffer getGuiRectModelBuffer(uint32_t frameIndex) const { return guiRectModelsGPU[frameIndex].buffer; }
+
         private:
             
             SlotBuffer<ObjectInstance, MAX_OBJECTS> objectInstances;
@@ -387,7 +457,7 @@ namespace Lca {
             std::vector<std::vector<uint32_t>> particleGfxSystems;
 
             // ── Particle compute pipeline data ──────────────────────
-            std::vector<std::unique_ptr<ParticleSystemCompPipeline>> particleCompPipelines;
+            std::vector<ParticleSystemCompPipeline> particleCompPipelines;
             std::unordered_map<std::string, uint32_t> particleCompPipelineMap;
             // Per comp pipeline: list of registered system slots
             std::vector<std::vector<uint32_t>> particleCompSystems;
@@ -398,6 +468,79 @@ namespace Lca {
             // Total number of particle system slots ever allocated (high-water mark
             // into particleSystemInstances, used for cull dispatch sizing).
             uint32_t particleSystemRegisteredCount{0};
+
+            // ── Text rendering data ────────────────────────────────
+            // Shared text model buffer (TextModel per letter)
+            std::array<DualBuffer, MAX_FRAMES_IN_FLIGHT> textModelsGPU;
+            std::array<std::vector<uint32_t>, MAX_FRAMES_IN_FLIGHT> dirtyTextModelIndices;
+            struct TextRange { uint32_t offset; uint32_t size; };
+            uint32_t textTransformTop{0};
+            std::vector<TextRange> textTransformFreeRanges;
+            uint32_t allocateTextTransformRange(uint32_t count);
+            void     freeTextTransformRange(uint32_t offset, uint32_t count);
+
+            // Per-pipeline indirect buffers with range allocation
+            struct TextPipelineBuffers {
+                std::array<DualBuffer, MAX_FRAMES_IN_FLIGHT> indirectBuffers;
+                std::array<std::vector<uint32_t>, MAX_FRAMES_IN_FLIGHT> dirtyIndirectIndices;
+                uint32_t top{0};
+                std::vector<TextRange> freeRanges;
+            };
+            std::vector<TextPipelineBuffers> textPipelineBufferData;
+            uint32_t allocateTextIndirectRange(TextPipelineBuffers& pb, uint32_t count);
+            void     freeTextIndirectRange(TextPipelineBuffers& pb, uint32_t offset, uint32_t count);
+
+            // Text pipelines
+            std::vector<TextPipeline> textPipelines;
+            std::unordered_map<std::string, uint32_t> textPipelineMap;
+
+            // Text instance slot management
+            struct TextSlotData {
+                TextInstance instance;
+                uint32_t maxLetters;
+                uint32_t transformBase;
+                uint32_t indirectBase;
+                uint32_t currentLetterCount;
+                bool active{false};
+            };
+            std::vector<TextSlotData> textSlots;
+            std::vector<uint32_t> freeTextSlots;
+
+            // ── GUI Text rendering data ────────────────────────────
+            // GUI text shares textModelsGPU (same TextModel buffer) but has
+            // separate pipelines, indirect buffers, and slot management.
+            std::vector<TextPipeline> guiTextPipelines;
+            std::unordered_map<std::string, uint32_t> guiTextPipelineMap;
+            std::vector<TextPipelineBuffers> guiTextPipelineBufferData;
+            std::vector<TextSlotData> guiTextSlots;
+            std::vector<uint32_t> freeGuiTextSlots;
+
+            // ── GUI Rect rendering data ────────────────────────────
+            std::array<DualBuffer, MAX_FRAMES_IN_FLIGHT> guiRectModelsGPU;
+            std::array<std::vector<uint32_t>, MAX_FRAMES_IN_FLIGHT> dirtyGuiRectModelIndices;
+
+            struct GuiRectSlotData {
+                GuiRectInstance instance;
+                bool active{false};
+            };
+            std::vector<GuiRectSlotData> guiRectSlots;
+            std::vector<uint32_t> freeGuiRectSlots;
+
+            // Per-pipeline indirect buffers (one draw per rect instance)
+            struct GuiRectPipelineBuffers {
+                std::array<DualBuffer, MAX_FRAMES_IN_FLIGHT> indirectBuffers;
+                std::array<std::vector<uint32_t>, MAX_FRAMES_IN_FLIGHT> dirtyIndirectIndices;
+                uint32_t top{0};
+                std::vector<TextRange> freeRanges;
+            };
+            std::vector<GuiRectPipeline> guiRectPipelines;
+            std::unordered_map<std::string, uint32_t> guiRectPipelineMap;
+            std::vector<GuiRectPipelineBuffers> guiRectPipelineBufferData;
+            // Maps slot ID → indirect buffer index within its pipeline
+            std::unordered_map<uint32_t, uint32_t> guiRectSlotToIndirect;
+
+            // Shared unit quad mesh for GUI rect rendering
+            uint32_t guiRectQuadMeshID{UINT32_MAX};
 
             
             glm::mat4 createViewMatrix(const glm::vec3& cameraPosition, const glm::vec3& cameraDirection, const glm::vec3& upDirection);

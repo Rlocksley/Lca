@@ -9,6 +9,9 @@
 
 #include "stb/stb_image.h"
 
+#include <ft2build.h>
+#include FT_FREETYPE_H
+
 
 namespace Lca{
     namespace Core{
@@ -117,6 +120,8 @@ namespace Lca{
             freeIndexRanges.clear();
             freeSkeletonVertexRanges.clear();
             freeSkeletonIndexRanges.clear();
+            fontMap.clear();
+            fontDataStore.clear();
 
             destroySlotBufferGPU(skeletonMeshInfos);
             destroySlotBufferGPU(meshInfos);
@@ -1278,6 +1283,243 @@ namespace Lca{
             std::lock_guard<std::mutex> lock(assetMutex);
             auto it = skeletonDataMap.find(name);
             LCA_ASSERT(it != skeletonDataMap.end(), "AssetManager", "getSkeletonData", "Skeleton data with name " + name + " not found.");
+            return it->second;
+        }
+
+        // ── Font loading ───────────────────────────────────────────
+
+        uint32_t AssetManager::loadFont(const std::string& name, const std::string& filePath, uint32_t pixelHeight) {
+            {
+                std::lock_guard<std::mutex> lock(assetMutex);
+                LCA_ASSERT(fontMap.find(name) == fontMap.end(), "AssetManager", "loadFont", "Font with name " + name + " already exists.");
+            }
+
+            // ── Initialise FreeType and load the face ──────────────
+            FT_Library ft;
+            LCA_ASSERT(FT_Init_FreeType(&ft) == 0, "AssetManager", "loadFont", "Failed to initialise FreeType.");
+            FT_Face face;
+            LCA_ASSERT(FT_New_Face(ft, filePath.c_str(), 0, &face) == 0, "AssetManager", "loadFont", "Failed to load font file: " + filePath);
+            FT_Set_Pixel_Sizes(face, 0, pixelHeight);
+
+            // ── First pass: render all printable ASCII glyphs, measure atlas ──
+            struct GlyphInfo {
+                char character;
+                uint32_t width, height;
+                int32_t bearingX, bearingY;
+                int32_t advanceX;
+                std::vector<uint8_t> bitmap;
+            };
+            std::vector<GlyphInfo> glyphs;
+            glyphs.reserve(95);
+
+            uint32_t atlasWidth = 0;
+            uint32_t atlasMaxHeight = 0;
+
+            for (char c = 32; c < 127; ++c) {
+                if (FT_Load_Char(face, c, FT_LOAD_RENDER) != 0) continue;
+                const FT_GlyphSlot g = face->glyph;
+
+                GlyphInfo gi{};
+                gi.character = c;
+                gi.width = g->bitmap.width;
+                gi.height = g->bitmap.rows;
+                gi.bearingX = g->bitmap_left;
+                gi.bearingY = g->bitmap_top;
+                gi.advanceX = static_cast<int32_t>(g->advance.x >> 6);
+                gi.bitmap.resize(gi.width * gi.height);
+                memcpy(gi.bitmap.data(), g->bitmap.buffer, gi.bitmap.size());
+
+                atlasWidth += gi.width + 1; // 1px padding
+                if (gi.height > atlasMaxHeight) atlasMaxHeight = gi.height;
+                glyphs.push_back(std::move(gi));
+            }
+
+            FT_Done_Face(face);
+            FT_Done_FreeType(ft);
+
+            uint32_t atlasHeight = atlasMaxHeight;
+            float invAtlasW = 1.0f / static_cast<float>(atlasWidth);
+            float invAtlasH = 1.0f / static_cast<float>(atlasHeight);
+
+            // ── Build atlas bitmap (single-channel R8) ─────────────
+            std::vector<uint8_t> atlasPixels(atlasWidth * atlasHeight, 0);
+            uint32_t penX = 0;
+            float maxGlyphWidth = 0.0f;
+            float maxGlyphHeight = static_cast<float>(atlasMaxHeight);
+
+            // Temp storage for UV / metrics per glyph
+            struct GlyphMetrics {
+                char character;
+                float u1, v1, u2, v2;
+                float width, height;
+                float bearingX, bearingY;
+                float advanceX;
+            };
+            std::vector<GlyphMetrics> metrics;
+            metrics.reserve(glyphs.size());
+
+            for (const auto& gi : glyphs) {
+                // Blit glyph into atlas row
+                for (uint32_t row = 0; row < gi.height; ++row) {
+                    memcpy(&atlasPixels[row * atlasWidth + penX],
+                           &gi.bitmap[row * gi.width],
+                           gi.width);
+                }
+
+                GlyphMetrics gm{};
+                gm.character = gi.character;
+                gm.u1 = static_cast<float>(penX) * invAtlasW;
+                gm.v1 = 0.0f;
+                gm.u2 = static_cast<float>(penX + gi.width) * invAtlasW;
+                gm.v2 = static_cast<float>(gi.height) * invAtlasH;
+                gm.width = static_cast<float>(gi.width);
+                gm.height = static_cast<float>(gi.height);
+                gm.bearingX = static_cast<float>(gi.bearingX);
+                gm.bearingY = static_cast<float>(gi.bearingY);
+                gm.advanceX = static_cast<float>(gi.advanceX);
+                metrics.push_back(gm);
+
+                if (gm.width > maxGlyphWidth) maxGlyphWidth = gm.width;
+
+                penX += gi.width + 1;
+            }
+
+            // ── Upload atlas as R8_UNORM texture ───────────────────
+            const std::string texName = "__font_" + name;
+            Texture fontTex = createFontTexture(atlasWidth, atlasHeight, atlasPixels.data());
+            addTexture(texName, fontTex);
+            uint32_t texId = getTextureId(texName);
+
+            // Create material referencing the font texture
+            const std::string matName = "__font_mat_" + name;
+            Material fontMat{};
+            fontMat.textureId = static_cast<int32_t>(texId);
+            fontMat.roughness = 1.0f;
+            fontMat.metallic = 0.0f;
+            uint32_t matId = addMaterial(matName, fontMat);
+
+            // ── Shared indices for all glyph quads ─────────────────
+            const std::vector<uint32_t> sharedIndices = {0, 2, 1, 0, 3, 2};
+            uint32_t indexOffset;
+            {
+                std::lock_guard<std::mutex> lock(assetMutex);
+                indexOffset = allocateRange(freeIndexRanges, currentIndexOffset, 6);
+            }
+            {
+                BufferInterface stagingIdx = createBufferInterface(6, sizeof(uint32_t), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+                memcpy(stagingIdx.pMemory, sharedIndices.data(), 6 * sizeof(uint32_t));
+                beginSingleCommand(singleCommand);
+                VkBufferCopy copy{};
+                copy.srcOffset = 0;
+                copy.dstOffset = indexOffset * sizeof(uint32_t);
+                copy.size = 6 * sizeof(uint32_t);
+                vkCmdCopyBuffer(singleCommand.vkCommandBuffer, stagingIdx.vkBuffer, indexBuffer.vkBuffer, 1, &copy);
+                endSingleCommand(singleCommand);
+                submitSingleCommand(singleCommand);
+                destroyBufferInterface(stagingIdx);
+            }
+
+            // ── Per-character glyph quads ──────────────────────────
+            uint32_t characterCount = static_cast<uint32_t>(metrics.size());
+            uint32_t totalVertices = characterCount * 4;
+            uint32_t vertexOffset;
+            {
+                std::lock_guard<std::mutex> lock(assetMutex);
+                vertexOffset = allocateRange(freeVertexRanges, currentVertexOffset, totalVertices);
+            }
+
+            std::vector<Vertex::Mesh> allVertices(totalVertices);
+            FontData fontData{};
+            fontData.textureId = texId;
+            fontData.materialId = matId;
+            fontData.maxWidth = maxGlyphWidth;
+            fontData.maxHeight = maxGlyphHeight;
+
+            for (uint32_t i = 0; i < characterCount; ++i) {
+                const auto& gm = metrics[i];
+
+                FontCharacter fc{};
+                fc.character = gm.character;
+                fc.u1 = gm.u1; fc.v1 = gm.v1;
+                fc.u2 = gm.u2; fc.v2 = gm.v2;
+                fc.width = gm.width; fc.height = gm.height;
+                fc.bearingY = gm.bearingY;
+                fc.advanceX = gm.advanceX;
+                fontData.characters[gm.character] = fc;
+
+                float w = gm.width;
+                float h = gm.height;
+                float bx = gm.bearingX;
+                float by = gm.bearingY;
+
+                uint32_t base = i * 4;
+                // Bottom-left
+                allVertices[base + 0].position = glm::vec3(bx, -(h - by), 0.0f);
+                allVertices[base + 0].texCoord = glm::vec2(gm.u1, gm.v2);
+                allVertices[base + 0].normal = glm::vec3(0.0f, 0.0f, 1.0f);
+                allVertices[base + 0].color = glm::vec4(1.0f);
+                // Bottom-right
+                allVertices[base + 1].position = glm::vec3(bx + w, -(h - by), 0.0f);
+                allVertices[base + 1].texCoord = glm::vec2(gm.u2, gm.v2);
+                allVertices[base + 1].normal = glm::vec3(0.0f, 0.0f, 1.0f);
+                allVertices[base + 1].color = glm::vec4(1.0f);
+                // Top-right
+                allVertices[base + 2].position = glm::vec3(bx + w, by, 0.0f);
+                allVertices[base + 2].texCoord = glm::vec2(gm.u2, gm.v1);
+                allVertices[base + 2].normal = glm::vec3(0.0f, 0.0f, 1.0f);
+                allVertices[base + 2].color = glm::vec4(1.0f);
+                // Top-left
+                allVertices[base + 3].position = glm::vec3(bx, by, 0.0f);
+                allVertices[base + 3].texCoord = glm::vec2(gm.u1, gm.v1);
+                allVertices[base + 3].normal = glm::vec3(0.0f, 0.0f, 1.0f);
+                allVertices[base + 3].color = glm::vec4(1.0f);
+
+                FontCharDrawInfo di{};
+                di.indexCount = 6;
+                di.firstIndex = indexOffset;
+                di.vertexOffset = static_cast<int32_t>(vertexOffset + base);
+                fontData.drawInfos[gm.character] = di;
+            }
+
+            // Upload glyph vertices
+            {
+                BufferInterface stagingVtx = createBufferInterface(totalVertices, sizeof(Vertex::Mesh), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+                memcpy(stagingVtx.pMemory, allVertices.data(), totalVertices * sizeof(Vertex::Mesh));
+                beginSingleCommand(singleCommand);
+                VkBufferCopy copy{};
+                copy.srcOffset = 0;
+                copy.dstOffset = vertexOffset * sizeof(Vertex::Mesh);
+                copy.size = totalVertices * sizeof(Vertex::Mesh);
+                vkCmdCopyBuffer(singleCommand.vkCommandBuffer, stagingVtx.vkBuffer, vertexBuffer.vkBuffer, 1, &copy);
+                endSingleCommand(singleCommand);
+                submitSingleCommand(singleCommand);
+                destroyBufferInterface(stagingVtx);
+            }
+
+            // Store font data
+            uint32_t fontId;
+            {
+                std::lock_guard<std::mutex> lock(assetMutex);
+                fontId = nextFontId++;
+                fontDataStore[fontId] = std::move(fontData);
+                fontMap[name] = fontId;
+            }
+
+            LCA_LOGI("AssetManager", "loadFont", "Loaded font '" + name + "' with " + std::to_string(characterCount) + " characters (FreeType, " + std::to_string(pixelHeight) + "px).");
+            return fontId;
+        }
+
+        const FontData& AssetManager::getFontData(uint32_t fontId) const {
+            std::lock_guard<std::mutex> lock(assetMutex);
+            auto it = fontDataStore.find(fontId);
+            LCA_ASSERT(it != fontDataStore.end(), "AssetManager", "getFontData", "Font ID not found.");
+            return it->second;
+        }
+
+        uint32_t AssetManager::getFontId(const std::string& name) const {
+            std::lock_guard<std::mutex> lock(assetMutex);
+            auto it = fontMap.find(name);
+            LCA_ASSERT(it != fontMap.end(), "AssetManager", "getFontId", "Font with name " + name + " not found.");
             return it->second;
         }
     }

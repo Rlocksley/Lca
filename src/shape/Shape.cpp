@@ -47,7 +47,7 @@ namespace Lca{
             };
         }
 
-    Sphere::Sphere(int radius, int latitudes, int longitudes, glm::vec3 offset, glm::vec4 color, bool invertNormals){
+    Sphere::Sphere(float radius, int latitudes, int longitudes, glm::vec3 offset, glm::vec4 color, bool invertNormals){
         GenerateSphereSmooth(radius, latitudes, longitudes, offset, color);
         if (invertNormals) {
             for (auto& vert : vertices)
@@ -61,7 +61,7 @@ namespace Lca{
     }
 
     
-    void Sphere::GenerateSphereSmooth(int radius, int latitudes, int longitudes, glm::vec3 offset, glm::vec4 color)
+    void Sphere::GenerateSphereSmooth(float radius, int latitudes, int longitudes, glm::vec3 offset, glm::vec4 color)
     {
         if(longitudes < 3)
             longitudes = 3;

@@ -117,6 +117,7 @@ float randPositive(uint seed) {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 void main() {
+    //TODO make buffers of Particles per Pipeline to be able to set MAX_DISPATCH_PER_PIPELINE per Pipeline
     uint tableIdx   = pc.pipelineIndex * MAX_DISPATCH_PER_PIPELINE + gl_WorkGroupID.x;
     ParticleDispatchEntry entry = dispatchTable[tableIdx];
 

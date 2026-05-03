@@ -1,0 +1,312 @@
+#version 450
+
+// fireball_sim.comp — Realistic fire particle simulation.
+//
+// Velocity-based physics: particles spawn on the sphere surface and get
+// pushed outward by thermal expansion, drift upward from convection, and
+// are perturbed by multi-frequency FBM turbulence.  A soft containment
+// sphere keeps the fire bounded.
+//
+// Three automatic tiers based on particle index:
+//   CORE  (first 40%)  — small, bright white/yellow, tight to surface
+//   FLAME (next  40%)  — medium orange, moderate drift, visible body
+//   WISP  (last  20%)  — large, faint red, chaotic, long-lived tendrils
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// ── Constants (must match Renderer.hpp) ───────────────────────────────────────
+const uint MAX_DISPATCH_PER_PIPELINE = 2048u;
+
+// ── Push constant ─────────────────────────────────────────────────────────────
+layout(push_constant) uniform PC {
+    uint pipelineIndex;
+} pc;
+
+// ── Binding 0: Particle system instances ──────────────────────────────────────
+struct ParticleSystemInstance {
+    uint  transformID;
+    uint  computeID;
+    uint  graphicsID;
+    uint  meshID;
+    uint  materialID;
+    uint  particleOffset;
+    uint  particleCount;
+    uint  isActive;
+    uint  indexCount;
+    uint  firstIndex;
+    int   vertexOffset;
+    float boundingSphereRadius;
+    mat4  localOffset;
+};
+
+layout(set = 0, binding = 0) readonly buffer ParticleSystemInstances {
+    ParticleSystemInstance instances[];
+};
+
+// ── Binding 1: Particle storage ────────────────────────────────────────────────
+struct Particle {
+    vec4 position;   // xyz = system-local position,  w = remaining lifetime (s)
+    vec4 velocity;   // xyz = velocity (m/s),          w = max lifetime (s)
+    vec4 color;      // rgba tint
+    vec4 params;     // x = size, y = system slot (uint bits), z = initial size, w = tier
+};
+
+layout(set = 0, binding = 1) buffer Particles {
+    Particle particles[];
+};
+
+// ── Binding 2: Model matrices ──────────────────────────────────────────────────
+struct ModelMatrix {
+    mat4 model;
+    mat4 normalMatrix;
+    vec4 scale;
+    vec4 rotation;
+    vec4 position;
+};
+
+layout(set = 0, binding = 2) readonly buffer ModelMatrices {
+    ModelMatrix modelMatrices[];
+};
+
+// ── Binding 3: Frame delta time ────────────────────────────────────────────────
+layout(set = 0, binding = 3) uniform DeltaTimeUBO {
+    float deltaTime;
+    float _pad0;
+    float _pad1;
+    float _pad2;
+} time;
+
+// ── Binding 4: Dispatch table ──────────────────────────────────────────────────
+struct ParticleDispatchEntry {
+    uint particleBase;
+    uint systemSlot;
+    uint pad0;
+    uint pad1;
+};
+
+layout(set = 0, binding = 4) readonly buffer DispatchTable {
+    ParticleDispatchEntry dispatchTable[];
+};
+
+// ── Fire constants ─────────────────────────────────────────────────────────────
+const float SPAWN_RADIUS     = 0.50;  // matches the visible sphere radius
+const float CONTAIN_RADIUS   = 1.6;   // soft boundary — larger = more volume
+const float CONTAIN_STRENGTH = 2.2;   // softer spring lets fire billow outward
+
+// ── CORE tier: small, bright, fast-cycling, tight to surface ───────────────────
+const float CORE_RADIAL   = 0.6;
+const float CORE_BUOYANCY = 0.15;
+const float CORE_TURB     = 2.8;
+const float CORE_DRAG     = 0.88;
+const float CORE_LIFE_MIN = 0.18;
+const float CORE_LIFE_MAX = 0.50;
+const float CORE_SIZE_MIN = 0.03;
+const float CORE_SIZE_MAX = 0.08;
+const float CORE_GROWTH   = 1.2;
+
+// ── FLAME tier: medium, orange, the visible fire body ──────────────────────────
+const float FLAME_RADIAL   = 0.9;
+const float FLAME_BUOYANCY = 0.40;
+const float FLAME_TURB     = 3.5;
+const float FLAME_DRAG     = 0.93;
+const float FLAME_LIFE_MIN = 0.40;
+const float FLAME_LIFE_MAX = 1.00;
+const float FLAME_SIZE_MIN = 0.07;
+const float FLAME_SIZE_MAX = 0.18;
+const float FLAME_GROWTH   = 1.4;
+
+// ── WISP tier: large, faint, chaotic outer tendrils ────────────────────────────
+const float WISP_RADIAL   = 0.40;
+const float WISP_BUOYANCY = 0.65;
+const float WISP_TURB     = 2.5;
+const float WISP_DRAG     = 0.95;
+const float WISP_LIFE_MIN = 0.60;
+const float WISP_LIFE_MAX = 1.40;
+const float WISP_SIZE_MIN = 0.12;
+const float WISP_SIZE_MAX = 0.30;
+const float WISP_GROWTH   = 1.8;
+
+// ── Pseudo-random helpers ──────────────────────────────────────────────────────
+uint hashPCG(uint v) {
+    uint state = v * 747796405u + 2891336453u;
+    uint word  = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+float randSigned(uint seed) {
+    return float(hashPCG(seed)) / float(0x7FFFFFFFu) - 1.0;
+}
+
+float randPositive(uint seed) {
+    return float(hashPCG(seed)) / float(0xFFFFFFFFu);
+}
+
+// ── 3D value noise for coherent turbulence ─────────────────────────────────────
+float hash3(vec3 p) {
+    float h = dot(p, vec3(127.1, 311.7, 74.7));
+    return fract(sin(h) * 43758.5453);
+}
+
+float valueNoise(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f); // smoothstep interpolation
+    return mix(
+        mix(mix(hash3(i),                hash3(i + vec3(1,0,0)), f.x),
+            mix(hash3(i + vec3(0,1,0)),  hash3(i + vec3(1,1,0)), f.x), f.y),
+        mix(mix(hash3(i + vec3(0,0,1)),  hash3(i + vec3(1,0,1)), f.x),
+            mix(hash3(i + vec3(0,1,1)),  hash3(i + vec3(1,1,1)), f.x), f.y),
+        f.z);
+}
+
+// Fractal Brownian Motion — returns a vec3 turbulence displacement.
+vec3 fbmTurbulence(vec3 pos, float t) {
+    vec3  turb = vec3(0.0);
+    float amp  = 1.0;
+    float freq = 2.5;
+    for (int i = 0; i < 3; i++) {
+        vec3 s = pos * freq + vec3(t * 0.7 * float(i + 1));
+        turb.x += (valueNoise(s)                           - 0.5) * amp;
+        turb.y += (valueNoise(s + vec3(43.0, 17.0, 89.0)) - 0.5) * amp;
+        turb.z += (valueNoise(s + vec3(71.0, 53.0, 23.0)) - 0.5) * amp;
+        amp  *= 0.5;
+        freq *= 2.0;
+    }
+    return turb;
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+void main() {
+    uint tableIdx   = pc.pipelineIndex * MAX_DISPATCH_PER_PIPELINE + gl_WorkGroupID.x;
+    ParticleDispatchEntry entry = dispatchTable[tableIdx];
+
+    uint particleIdx = entry.particleBase + gl_LocalInvocationIndex;
+    uint systemSlot  = entry.systemSlot;
+
+    ParticleSystemInstance inst = instances[systemSlot];
+
+    uint systemEnd = inst.particleOffset + inst.particleCount;
+    if (particleIdx >= systemEnd) return;
+    if (inst.isActive == 0u) return;
+
+    Particle p  = particles[particleIdx];
+    float    dt = time.deltaTime;
+
+    // ── Determine tier from particle index within the system ──────────────────
+    uint  localIdx = particleIdx - inst.particleOffset;
+    float tierFrac = float(localIdx) / float(max(inst.particleCount, 1u));
+    uint  tier     = tierFrac < 0.30 ? 0u : (tierFrac < 0.80 ? 1u : 2u);
+
+    // Select per-tier constants
+    float radialSpeed, buoyancy, turbStrength, drag, growth;
+    if (tier == 0u) {
+        radialSpeed  = CORE_RADIAL;   buoyancy = CORE_BUOYANCY;
+        turbStrength = CORE_TURB;     drag     = CORE_DRAG;   growth = CORE_GROWTH;
+    } else if (tier == 1u) {
+        radialSpeed  = FLAME_RADIAL;  buoyancy = FLAME_BUOYANCY;
+        turbStrength = FLAME_TURB;    drag     = FLAME_DRAG;  growth = FLAME_GROWTH;
+    } else {
+        radialSpeed  = WISP_RADIAL;   buoyancy = WISP_BUOYANCY;
+        turbStrength = WISP_TURB;     drag     = WISP_DRAG;   growth = WISP_GROWTH;
+    }
+
+    // ── Velocity-based physics integration ────────────────────────────────────
+    vec3  pos       = p.position.xyz;
+    float dist      = length(pos);
+    vec3  radialDir = dist > 0.001 ? normalize(pos) : vec3(0, 1, 0);
+    float ageFrac   = p.position.w / max(p.velocity.w, 0.001); // 1 = fresh, 0 = dying
+
+    // Radial expansion (thermal pressure — stronger when freshly spawned)
+    p.velocity.xyz += radialDir * radialSpeed * (0.5 + ageFrac * 0.5) * dt;
+
+    // Buoyancy — hot gas rises
+    p.velocity.y += buoyancy * dt;
+
+    // Coherent FBM turbulence — creates realistic flickering and swirling
+    float tVal = float(particleIdx) * 0.1 + p.position.w * 2.0;
+    vec3  turb = fbmTurbulence(pos * 3.0, tVal);
+    p.velocity.xyz += turb * turbStrength * dt;
+
+    // Soft containment sphere — gentle spring pulls particles back if they drift
+    // too far, keeping the fire bounded in a roughly spherical volume.
+    if (dist > CONTAIN_RADIUS) {
+        float excess = dist - CONTAIN_RADIUS;
+        p.velocity.xyz -= radialDir * excess * CONTAIN_STRENGTH * dt;
+    }
+
+    // Drag — dissipates kinetic energy over time
+    p.velocity.xyz *= pow(drag, dt * 60.0);
+
+    // Integrate position from velocity
+    p.position.xyz += p.velocity.xyz * dt;
+
+    // Countdown lifetime
+    p.position.w -= dt;
+
+    // ── Size growth — expanding hot gas ───────────────────────────────────────
+    float lifeProgress = 1.0 - ageFrac; // 0 = birth, 1 = death
+    p.params.x = p.params.z * (1.0 + (growth - 1.0) * lifeProgress);
+
+    // ── Blackbody colour ramp ─────────────────────────────────────────────────
+    float heat;
+    if      (tier == 0u) heat = 0.70 + ageFrac * 0.30;   // 0.70–1.00  (hot white/yellow)
+    else if (tier == 1u) heat = 0.30 + ageFrac * 0.55;   // 0.30–0.85  (orange body)
+    else                 heat = 0.10 + ageFrac * 0.35;   // 0.10–0.45  (red/ember wisps)
+
+    p.color.r = min(1.0, heat * 1.5);
+    p.color.g = max(0.0, heat * heat * 1.2 - 0.08);
+    p.color.b = max(0.0, heat * heat * heat * 0.9 - 0.04);
+
+    // Alpha envelope: fast fade-in, hold, gradual fade-out
+    float birthFade = smoothstep(0.0, 0.12, lifeProgress);
+    float deathFade = smoothstep(1.0, 0.65, lifeProgress);
+    float baseAlpha = (tier == 0u) ? 0.95 : (tier == 1u) ? 0.80 : 0.50;
+    p.color.a = birthFade * deathFade * baseAlpha;
+
+    // ── Respawn dead particles ────────────────────────────────────────────────
+    if (p.position.w <= 0.0) {
+        uint seed = particleIdx ^ hashPCG(uint(dt * 65536.0) + particleIdx * 97u);
+
+        // Uniform random point on sphere surface
+        float theta  = randPositive(seed) * 6.28318;
+        float phi    = acos(1.0 - 2.0 * randPositive(seed + 1u));
+        vec3  dir    = vec3(cos(theta) * sin(phi), cos(phi), sin(theta) * sin(phi));
+        float spawnR = SPAWN_RADIUS * (0.9 + randPositive(seed + 2u) * 0.2);
+        p.position.xyz = dir * spawnR;
+
+        // Tier-based lifetime, size, initial speed
+        float minLife, maxLife, minSize, maxSize, initSpeed;
+        if (tier == 0u) {
+            minLife = CORE_LIFE_MIN;  maxLife = CORE_LIFE_MAX;
+            minSize = CORE_SIZE_MIN;  maxSize = CORE_SIZE_MAX;  initSpeed = 0.3;
+        } else if (tier == 1u) {
+            minLife = FLAME_LIFE_MIN; maxLife = FLAME_LIFE_MAX;
+            minSize = FLAME_SIZE_MIN; maxSize = FLAME_SIZE_MAX; initSpeed = 0.5;
+        } else {
+            minLife = WISP_LIFE_MIN;  maxLife = WISP_LIFE_MAX;
+            minSize = WISP_SIZE_MIN;  maxSize = WISP_SIZE_MAX;  initSpeed = 0.2;
+        }
+
+        p.position.w = minLife + randPositive(seed + 3u) * (maxLife - minLife);
+        p.velocity.w = p.position.w;
+
+        // Initial velocity: radial outward + small random scatter
+        p.velocity.xyz = dir * initSpeed
+                       + vec3(randSigned(seed + 4u),
+                              randSigned(seed + 5u),
+                              randSigned(seed + 6u)) * 0.15;
+
+        // Particle size
+        p.params.z = minSize + randPositive(seed + 7u) * (maxSize - minSize);
+        p.params.x = p.params.z;
+
+        // System slot + tier
+        p.params.y = uintBitsToFloat(systemSlot);
+        p.params.w = float(tier);
+
+        // Birth colour: hot
+        p.color = vec4(1.0, 0.9, 0.5, 0.0);
+    }
+
+    particles[particleIdx] = p;
+}

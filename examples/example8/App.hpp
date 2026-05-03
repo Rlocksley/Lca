@@ -12,6 +12,7 @@
 #include "RigidBody.hpp"
 #include "BoxCollider.hpp"
 #include "CharacterCapsule.hpp"
+#include "ParticleSystem.hpp"
 // ──────────────────────────────────────────────────────────────
 // Example 8 — Skeleton Mesh with Physics CharacterCapsule
 //
@@ -63,6 +64,66 @@ protected:
         platMat.textureId = -1;
         Core::GetAssetManager().addMaterial("platformMat", platMat);
 
+        // ── Fireball particle compute pipeline ────────────────
+        Core::ParticleSystemCompPipeline fireballSimPipeline("shader/fireball_sim.comp.spv");
+        Core::GetRenderer().addParticleSystemCompPipeline("fireballSim", std::move(fireballSimPipeline));
+
+        // ── Fireball particle graphics pipeline ───────────────
+        Core::GraphicsPipelineConfig fireballCfg{};
+        fireballCfg.vertexShader    = "shader/fireball.vert.spv";
+        fireballCfg.fragmentShader  = "shader/fireball.frag.spv";
+        fireballCfg.cullMode        = VK_CULL_MODE_NONE;
+        fireballCfg.depthWriteEnable = false;
+        Core::ParticleSystemPipeline fireballGfxPipeline(fireballCfg);
+        Core::GetRenderer().addParticleSystemPipeline("fireballGfx", std::move(fireballGfxPipeline));
+
+        // ── Ember / spark compute pipeline ────────────────────
+        Core::ParticleSystemCompPipeline emberSimPipeline("shader/fireball_ember.comp.spv");
+        Core::GetRenderer().addParticleSystemCompPipeline("fireballEmberSim", std::move(emberSimPipeline));
+
+        // ── Ember / spark graphics pipeline ───────────────────
+        Core::GraphicsPipelineConfig emberCfg{};
+        emberCfg.vertexShader    = "shader/fireball.vert.spv";
+        emberCfg.fragmentShader  = "shader/fireball_ember.frag.spv";
+        emberCfg.cullMode        = VK_CULL_MODE_NONE;
+        emberCfg.depthWriteEnable = false;
+        Core::ParticleSystemPipeline emberGfxPipeline(emberCfg);
+        Core::GetRenderer().addParticleSystemPipeline("fireballEmberGfx", std::move(emberGfxPipeline));
+
+        // ── Fireball billboard quad mesh ──────────────────────
+        Shape::Square fireballSquare(0.5f, glm::vec3(0.0f), glm::vec4(1.0f));
+        Core::GetAssetManager().addMesh("fireballSquare", fireballSquare.getVertices(), fireballSquare.getIndices());
+
+        // ── Fireball sphere mesh (the projectile core) ────────
+        Shape::Sphere fireballSphere(0.5f, 16, 16, glm::vec3(0.0f), glm::vec4(1.0f, 0.4f, 0.1f, 1.0f));
+        Core::GetAssetManager().addMesh("fireballSphere", fireballSphere.getVertices(), fireballSphere.getIndices());
+        Core::Material fireballSphereMat{};
+        fireballSphereMat.metallic  = 0.0f;
+        fireballSphereMat.roughness = 0.5f;
+        fireballSphereMat.textureId = -1;
+        Core::GetAssetManager().addMaterial("fireballSphereMat", fireballSphereMat);
+
+        // ── Fireball fire sprite texture ──────────────────────
+        {
+            auto pixels = ProceduralFireTex::generateFireSprite(128, 128, 42.0f);
+            Core::Texture fireTex = Core::createTexture(128, 128, pixels.data());
+            Core::GetAssetManager().addTexture("fireballTex", fireTex);
+        }
+
+        // ── Fireball particle material ────────────────────────
+        Core::Material fireballMat{};
+        fireballMat.metallic   = 1.0f;
+        fireballMat.roughness  = 1.0f;
+        fireballMat.textureId  = static_cast<int>(Core::GetAssetManager().getTextureId("fireballTex"));
+        Core::GetAssetManager().addMaterial("fireballMat", fireballMat);
+
+        // ── Ember particle material (no texture — just dots) ──
+        Core::Material emberMat{};
+        emberMat.metallic  = 1.0f;
+        emberMat.roughness = 1.0f;
+        emberMat.textureId = -1;
+        Core::GetAssetManager().addMaterial("fireballEmberMat", emberMat);
+
         // ── ECS modules ───────────────────────────────────────
         world.import<flecs::stats>();
         world.set<flecs::Rest>({});
@@ -82,6 +143,7 @@ protected:
         world.import<Module::BoxColliderModule>();
         world.import<Module::RigidBodyModule>();
         world.import<Module::CharacterCapsuleModule>();
+        world.import<Module::ParticleSystem>();
 
         // ── Load the wizard level ─────────────────────────────
         auto wizardLevel = std::make_shared<WizardLevel>();
@@ -125,6 +187,6 @@ protected:
     }
 
     void onLevelReady() override {
-        std::cout << "[Example8] Wizard loaded. WASD to move, Shift to run, Space to jump, Left-click to attack.\n";
+        std::cout << "[Example8] Wizard loaded. WASD to move, Shift to run, Space to jump, Left-click to shoot fireball.\n";
     }
 };

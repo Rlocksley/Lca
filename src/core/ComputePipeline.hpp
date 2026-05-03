@@ -9,6 +9,7 @@ namespace Lca {
         public:
             ComputePipeline(const std::string& computeShaderPath) : Pipeline(), computeShader(computeShaderPath) {
             }
+            ComputePipeline(ComputePipeline&&) noexcept = default;
             virtual ~ComputePipeline() override = default;
 
             virtual void build() override;

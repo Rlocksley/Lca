@@ -19,9 +19,13 @@ AnimationStateMachine.hpp
 AnimationStateMachine.cpp
 BoxCollider.hpp
 CharacterCapsule.hpp
+NavMesh.hpp
 PhysicsModule.hpp
 RigidBody.hpp
 Sensor.hpp
+Text.hpp
+GuiDragDrop.hpp
+GuiScrollList.hpp
 )
 
 target_include_directories(lca_component PUBLIC ../core ../flecs)

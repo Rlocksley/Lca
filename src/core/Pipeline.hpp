@@ -14,6 +14,10 @@ namespace Lca{
         class Pipeline{
         public:
             Pipeline();
+            Pipeline(const Pipeline&) = delete;
+            Pipeline& operator=(const Pipeline&) = delete;
+            Pipeline(Pipeline&& other) noexcept;
+            Pipeline& operator=(Pipeline&& other) noexcept;
             virtual ~Pipeline();
 
             Pipeline& addUniformBuffer(const uint32_t descriptorSetIndex, const uint32_t binding, const BufferInterface& buffer, const VkShaderStageFlags stageFlags);

@@ -12,6 +12,7 @@
 #include "RigidBody.hpp"
 #include "BoxCollider.hpp"
 #include "CharacterCapsule.hpp"
+#include "NavMesh.hpp"
 
 // ──────────────────────────────────────────────────────────────
 // Example 6 — Level Streaming (10x10 City Grid, proximity-based)
@@ -79,6 +80,7 @@ protected:
         world.import<Module::BoxColliderModule>();
         world.import<Module::RigidBodyModule>();
         world.import<Module::CharacterCapsuleModule>();
+        world.import<Module::NavMesh>();
 
         // Load the city level (shows loading screen, then sets up
         // the 10x10 streaming zone grid and proximity system)

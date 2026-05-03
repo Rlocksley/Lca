@@ -60,6 +60,10 @@ find_package(Jolt REQUIRED)
 
 find_package(assimp REQUIRED)
 
+find_package(recastnavigation CONFIG REQUIRED)
+
+find_package(Freetype REQUIRED)
+
 # --- Build Internal Libraries ---
 # Process the subdirectories to create our 'component_lib' and 'core_lib' targets.
 add_subdirectory(./src/core)
@@ -80,7 +84,7 @@ add_subdirectory(./examples/example6)
 add_subdirectory(./examples/example7)
 add_subdirectory(./examples/example8)
 add_subdirectory(./examples/example9)
-#add_subdirectory(./examples/example10)
+add_subdirectory(./examples/example10)
 #add_subdirectory(./examples/example11)
 #add_subdirectory(./examples/example12)
 #add_subdirectory(./examples/example13)

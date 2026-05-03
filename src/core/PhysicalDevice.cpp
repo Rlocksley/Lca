@@ -162,6 +162,18 @@ namespace Lca
             vkGetPhysicalDeviceSurfaceFormatsKHR
             (vkPhysicalDevice, vkSurfaceKHR, &numberFormats, formats.data());
 
+            // Prefer SRGB swapchain so the hardware encodes linear→sRGB on write,
+            // matching the sRGB textures sampled in the shaders (VK_FORMAT_R8G8B8A8_SRGB).
+            for(uint32_t i = 0; i < numberFormats; i++)
+            {
+                if(formats[i].format == VK_FORMAT_B8G8R8A8_SRGB &&
+                formats[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
+                {
+                    vkSurfaceFormatKHR = formats[i];
+                    return;
+                }
+            }
+            // Fallback: BGRA_UNORM with SRGB colorspace
             for(uint32_t i = 0; i < numberFormats; i++)
             {
                 if(formats[i].format == VK_FORMAT_B8G8R8A8_UNORM &&

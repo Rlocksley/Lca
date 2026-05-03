@@ -1,4 +1,5 @@
 #include "Renderer.hpp"
+#include <bit>
 #include <map>
 #include <cstring>
 #include <algorithm>
@@ -56,6 +57,12 @@ namespace Lca{
                 particleDeltaTimeBuffer[i]     = createDualBuffer(1, sizeof(ParticleDeltaTimeUniform), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
                 particleGfxDrawCounts[i] = createBuffer(Lca::Core::MAX_PARTICLE_GFX_PIPELINES, sizeof(uint32_t),
                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+
+                // ── Text rendering buffers ────────────────────────────
+                textModelsGPU[i] = createDualBuffer(Lca::Core::MAX_TEXT_LETTERS, sizeof(TextModel), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+
+                // ── GUI Rect rendering buffers ────────────────────────
+                guiRectModelsGPU[i] = createDualBuffer(Lca::Core::MAX_GUI_RECTS, sizeof(GuiRectModel), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
             }
 
             // Per-pipeline device-local indirect buffers written every frame by ParticleCullPipeline.
@@ -143,14 +150,6 @@ namespace Lca{
             skeletonCullPipeline = std::make_unique<SkeletonCullPipeline>("shader/skeleton_cull.comp.spv");
             skeletonCullPipeline->build();
 
-            // Pre-reserve so that addParticleSystemPipeline() / addMeshPipeline() never
-            // trigger a reallocation.  Pipeline has no user-defined move constructor, so a
-            // reallocation would copy the raw VkPipeline handle then destroy the old element,
-            // calling vkDestroyPipeline on a still-live handle (use-after-free / 0xee handle).
-            particlePipelines.reserve(Lca::Core::MAX_PARTICLE_GFX_PIPELINES);
-            meshPipelines.reserve(Lca::Core::MAX_SHADERS);
-            skeletonMeshPipelines.reserve(Lca::Core::MAX_SHADERS);
-
             // Particle cull pipeline: built after all particle pipelines are registered
             // (same pattern as uberCull). The shader path placeholder will be replaced
             // once particle_cull.comp.spv is compiled.
@@ -189,7 +188,46 @@ namespace Lca{
                 destroyDualBuffer(particleSystemInstancesGPU[i]);
                 destroyDualBuffer(particleDeltaTimeBuffer[i]);
                 destroyBuffer(particleGfxDrawCounts[i]);
+
+                destroyDualBuffer(textModelsGPU[i]);
+
+                destroyDualBuffer(guiRectModelsGPU[i]);
             }
+            // Text pipeline indirect buffers
+            for (auto& pb : textPipelineBufferData) {
+                for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                    destroyDualBuffer(pb.indirectBuffers[i]);
+                }
+            }
+            textPipelineBufferData.clear();
+            textPipelines.clear();
+            textPipelineMap.clear();
+            textSlots.clear();
+            freeTextSlots.clear();
+            textTransformFreeRanges.clear();
+            // GUI text pipeline indirect buffers
+            for (auto& pb : guiTextPipelineBufferData) {
+                for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                    destroyDualBuffer(pb.indirectBuffers[i]);
+                }
+            }
+            guiTextPipelineBufferData.clear();
+            guiTextPipelines.clear();
+            guiTextPipelineMap.clear();
+            guiTextSlots.clear();
+            freeGuiTextSlots.clear();
+            // GUI rect pipeline indirect buffers
+            for (auto& pb : guiRectPipelineBufferData) {
+                for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                    destroyDualBuffer(pb.indirectBuffers[i]);
+                }
+            }
+            guiRectPipelineBufferData.clear();
+            guiRectPipelines.clear();
+            guiRectPipelineMap.clear();
+            guiRectSlots.clear();
+            freeGuiRectSlots.clear();
+            guiRectSlotToIndirect.clear();
             destroyBuffer(particleStorageBuffer);
             for (auto& buf : particleGfxIndirectBuffers) { destroyBuffer(buf); }
             particleGfxIndirectBuffers.clear();
@@ -236,6 +274,15 @@ namespace Lca{
             for (auto& skeletonPipeline : skeletonMeshPipelines) {
                 skeletonPipeline.updateDescriptorSetWrites();
             }
+            for (auto& textPipeline : textPipelines) {
+                textPipeline.updateDescriptorSetWrites();
+            }
+            for (auto& guiPipeline : guiTextPipelines) {
+                guiPipeline.updateDescriptorSetWrites();
+            }
+            for (auto& guiRectPipeline : guiRectPipelines) {
+                guiRectPipeline.updateDescriptorSetWrites();
+            }
         }
         
         void Renderer::recordFrame(uint32_t frameIndex){
@@ -265,6 +312,28 @@ namespace Lca{
             // Particle system instance uploads and deltaTime uniform
             particleSystemInstancesGPU[frameIndex].recordSyncRanges(command[frameIndex], dirtyParticleSystemIndices[frameIndex]);
             particleDeltaTimeBuffer[frameIndex].recordSync(command[frameIndex]);
+
+            // Text model uploads
+            textModelsGPU[frameIndex].recordSyncRanges(command[frameIndex], dirtyTextModelIndices[frameIndex]);
+            dirtyTextModelIndices[frameIndex].clear();
+            // Per-pipeline text indirect buffer uploads
+            for (auto& pb : textPipelineBufferData) {
+                pb.indirectBuffers[frameIndex].recordSyncRanges(command[frameIndex], pb.dirtyIndirectIndices[frameIndex]);
+                pb.dirtyIndirectIndices[frameIndex].clear();
+            }
+            // Per-pipeline GUI text indirect buffer uploads
+            for (auto& pb : guiTextPipelineBufferData) {
+                pb.indirectBuffers[frameIndex].recordSyncRanges(command[frameIndex], pb.dirtyIndirectIndices[frameIndex]);
+                pb.dirtyIndirectIndices[frameIndex].clear();
+            }
+            // GUI rect model uploads
+            guiRectModelsGPU[frameIndex].recordSyncRanges(command[frameIndex], dirtyGuiRectModelIndices[frameIndex]);
+            dirtyGuiRectModelIndices[frameIndex].clear();
+            // Per-pipeline GUI rect indirect buffer uploads
+            for (auto& pb : guiRectPipelineBufferData) {
+                pb.indirectBuffers[frameIndex].recordSyncRanges(command[frameIndex], pb.dirtyIndirectIndices[frameIndex]);
+                pb.dirtyIndirectIndices[frameIndex].clear();
+            }
 
             vkCmdFillBuffer(command[frameIndex].vkCommandBuffer, drawCounts[frameIndex].vkBuffer, 0, VK_WHOLE_SIZE, 0);
             for (auto& indirectBuffer : indirectBuffers[frameIndex]) {
@@ -437,18 +506,18 @@ namespace Lca{
             for (uint32_t compIdx = 0; compIdx < static_cast<uint32_t>(particleCompPipelines.size()); ++compIdx) {
                 if (particleCompSystems[compIdx].empty()) continue;
 
-                VkDescriptorSet descSet = particleCompPipelines[compIdx]->getVkDescriptorSet(frameIndex);
+                VkDescriptorSet descSet = particleCompPipelines[compIdx].getVkDescriptorSet(frameIndex);
                 vkCmdBindPipeline(command[frameIndex].vkCommandBuffer,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
-                    particleCompPipelines[compIdx]->getVkPipeline());
+                    particleCompPipelines[compIdx].getVkPipeline());
                 vkCmdBindDescriptorSets(command[frameIndex].vkCommandBuffer,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
-                    particleCompPipelines[compIdx]->getVkPipelineLayout(),
+                    particleCompPipelines[compIdx].getVkPipelineLayout(),
                     0, 1, &descSet, 0, nullptr);
                 // Pass pipelineIndex so the shader can compute its dispatch table base:
                 //   dispatchTable[pipelineIndex * MAX_DISPATCH_PER_PIPELINE + gl_WorkGroupID.x]
                 vkCmdPushConstants(command[frameIndex].vkCommandBuffer,
-                    particleCompPipelines[compIdx]->getVkPipelineLayout(),
+                    particleCompPipelines[compIdx].getVkPipelineLayout(),
                     VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t), &compIdx);
                 // x = total workgroups for all visible systems using this pipeline.
                 vkCmdDispatchIndirect(command[frameIndex].vkCommandBuffer,
@@ -880,7 +949,153 @@ namespace Lca{
                     }
                 }
 
+                // --- Text rendering ---
+                // Each text pipeline uses one vkCmdDrawIndexedIndirect call covering
+                // ALL text instances on that pipeline. Empty slots have instanceCount=0.
+                if (!textPipelines.empty()) {
+                    const Buffer textVB = GetAssetManager().getVertexBuffer();
+                    const Buffer textIB = GetAssetManager().getIndexBuffer();
+                    VkBuffer vkTextVB = textVB.vkBuffer;
+                    vkCmdBindVertexBuffers(command[frameIndex].vkCommandBuffer, 0, 1, &vkTextVB, offsets);
+                    vkCmdBindIndexBuffer(command[frameIndex].vkCommandBuffer, textIB.vkBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+                    for (uint32_t tIdx = 0; tIdx < static_cast<uint32_t>(textPipelines.size()); ++tIdx) {
+                        if (textPipelineBufferData[tIdx].top == 0) continue;
+
+                        VkDescriptorSet descSet = textPipelines[tIdx].getVkDescriptorSet(frameIndex);
+                        vkCmdBindPipeline(command[frameIndex].vkCommandBuffer,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            textPipelines[tIdx].getVkPipeline());
+                        vkCmdBindDescriptorSets(command[frameIndex].vkCommandBuffer,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            textPipelines[tIdx].getVkPipelineLayout(),
+                            0, 1, &descSet, 0, nullptr);
+
+                        vkCmdDrawIndexedIndirect(
+                            command[frameIndex].vkCommandBuffer,
+                            textPipelineBufferData[tIdx].indirectBuffers[frameIndex].buffer.vkBuffer,
+                            0,
+                            textPipelineBufferData[tIdx].top,
+                            sizeof(VkDrawIndexedIndirectCommand));
+                    }
+                }
+
                 vkCmdEndRendering(command[frameIndex].vkCommandBuffer);
+
+                // ── GUI Overlay Pass ───────────────────────────────────────────
+                // Renders 2D screen-space GUI (rects then text) on top of the 3D scene.
+                // Clears depth so 3D objects cannot occlude GUI, but GUI
+                // widgets can depth-test against each other.
+                if (!guiTextPipelines.empty() || !guiRectPipelines.empty()) {
+                    // Transition depthMaps from SHADER_READ_ONLY to DEPTH_STENCIL_ATTACHMENT
+                    VkImageMemoryBarrier guiDepthBarrier{};
+                    guiDepthBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                    guiDepthBarrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                    guiDepthBarrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+                    guiDepthBarrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                    guiDepthBarrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                    guiDepthBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    guiDepthBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    guiDepthBarrier.image = depthMaps[frameIndex].vkImage;
+                    guiDepthBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+                    guiDepthBarrier.subresourceRange.baseMipLevel = 0;
+                    guiDepthBarrier.subresourceRange.levelCount = 1;
+                    guiDepthBarrier.subresourceRange.baseArrayLayer = 0;
+                    guiDepthBarrier.subresourceRange.layerCount = 1;
+
+                    vkCmdPipelineBarrier(
+                        command[frameIndex].vkCommandBuffer,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                        0,
+                        0, nullptr,
+                        0, nullptr,
+                        1, &guiDepthBarrier
+                    );
+
+                    // Color: render directly to swapchain (single-sample), load existing content
+                    VkRenderingAttachmentInfo guiColorAttachment{};
+                    guiColorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+                    guiColorAttachment.imageView = swapchain.vkImageViews[swapchain.imageIndex];
+                    guiColorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                    guiColorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+                    guiColorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+                    // Depth: cleared to 1.0 so GUI text is never occluded by 3D scene
+                    VkRenderingAttachmentInfo guiDepthAttachment{};
+                    guiDepthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+                    guiDepthAttachment.imageView = depthMaps[frameIndex].vkImageView;
+                    guiDepthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                    guiDepthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                    guiDepthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+                    guiDepthAttachment.clearValue.depthStencil = {1.0f, 0};
+
+                    VkRenderingInfo guiRenderingInfo{};
+                    guiRenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+                    guiRenderingInfo.pNext = nullptr;
+                    guiRenderingInfo.flags = 0;
+                    guiRenderingInfo.renderArea.offset = {0, 0};
+                    guiRenderingInfo.renderArea.extent = vkExtent2D;
+                    guiRenderingInfo.layerCount = 1;
+                    guiRenderingInfo.viewMask = 0;
+                    guiRenderingInfo.colorAttachmentCount = 1;
+                    guiRenderingInfo.pColorAttachments = &guiColorAttachment;
+                    guiRenderingInfo.pDepthAttachment = &guiDepthAttachment;
+                    guiRenderingInfo.pStencilAttachment = nullptr;
+
+                    vkCmdBeginRendering(command[frameIndex].vkCommandBuffer, &guiRenderingInfo);
+
+                    const Buffer guiVB = GetAssetManager().getVertexBuffer();
+                    const Buffer guiIB = GetAssetManager().getIndexBuffer();
+                    VkBuffer vkGuiVB = guiVB.vkBuffer;
+                    VkDeviceSize guiOffsets[] = {0};
+                    vkCmdBindVertexBuffers(command[frameIndex].vkCommandBuffer, 0, 1, &vkGuiVB, guiOffsets);
+                    vkCmdBindIndexBuffer(command[frameIndex].vkCommandBuffer, guiIB.vkBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+                    // ── Draw GUI Rects first (backgrounds) ────────────────
+                    for (uint32_t rIdx = 0; rIdx < static_cast<uint32_t>(guiRectPipelines.size()); ++rIdx) {
+                        if (guiRectPipelineBufferData[rIdx].top == 0) continue;
+
+                        VkDescriptorSet descSet = guiRectPipelines[rIdx].getVkDescriptorSet(frameIndex);
+                        vkCmdBindPipeline(command[frameIndex].vkCommandBuffer,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            guiRectPipelines[rIdx].getVkPipeline());
+                        vkCmdBindDescriptorSets(command[frameIndex].vkCommandBuffer,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            guiRectPipelines[rIdx].getVkPipelineLayout(),
+                            0, 1, &descSet, 0, nullptr);
+
+                        vkCmdDrawIndexedIndirect(
+                            command[frameIndex].vkCommandBuffer,
+                            guiRectPipelineBufferData[rIdx].indirectBuffers[frameIndex].buffer.vkBuffer,
+                            0,
+                            guiRectPipelineBufferData[rIdx].top,
+                            sizeof(VkDrawIndexedIndirectCommand));
+                    }
+
+                    // ── Draw GUI Text (labels on top of rects) ────────────
+                    for (uint32_t gIdx = 0; gIdx < static_cast<uint32_t>(guiTextPipelines.size()); ++gIdx) {
+                        if (guiTextPipelineBufferData[gIdx].top == 0) continue;
+
+                        VkDescriptorSet descSet = guiTextPipelines[gIdx].getVkDescriptorSet(frameIndex);
+                        vkCmdBindPipeline(command[frameIndex].vkCommandBuffer,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            guiTextPipelines[gIdx].getVkPipeline());
+                        vkCmdBindDescriptorSets(command[frameIndex].vkCommandBuffer,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            guiTextPipelines[gIdx].getVkPipelineLayout(),
+                            0, 1, &descSet, 0, nullptr);
+
+                        vkCmdDrawIndexedIndirect(
+                            command[frameIndex].vkCommandBuffer,
+                            guiTextPipelineBufferData[gIdx].indirectBuffers[frameIndex].buffer.vkBuffer,
+                            0,
+                            guiTextPipelineBufferData[gIdx].top,
+                            sizeof(VkDrawIndexedIndirectCommand));
+                    }
+
+                    vkCmdEndRendering(command[frameIndex].vkCommandBuffer);
+                }
 
                 // Transition the swapchain image from COLOR_ATTACHMENT_OPTIMAL to PRESENT_SRC_KHR for presentation
                 VkImageMemoryBarrier swapBarrierPresent{};
@@ -1353,8 +1568,8 @@ namespace Lca{
                 "Renderer", "addParticleSystemCompPipeline", "MAX_PARTICLE_COMP_PIPELINES exceeded.")
 
             const uint32_t id = static_cast<uint32_t>(particleCompPipelines.size());
-            particleCompPipelines.push_back(std::make_unique<ParticleSystemCompPipeline>(std::move(pipeline)));
-            particleCompPipelines.back()->build();
+            particleCompPipelines.push_back(std::move(pipeline));
+            particleCompPipelines.back().build();
             particleCompPipelineMap[name] = id;
             particleCompSystems.emplace_back();
 
@@ -1413,6 +1628,742 @@ namespace Lca{
             auto it = particlePipelineMap.find(name);
             LCA_ASSERT(it != particlePipelineMap.end(), "Renderer", "getParticleSystemPipelineId", "Particle pipeline not found.")
             return it->second;
+        }
+
+        // ── Text transform range allocation ────────────────────
+
+        uint32_t Renderer::allocateTextTransformRange(uint32_t count) {
+            for (size_t i = 0; i < textTransformFreeRanges.size(); ++i) {
+                if (textTransformFreeRanges[i].size >= count) {
+                    uint32_t offset = textTransformFreeRanges[i].offset;
+                    if (textTransformFreeRanges[i].size > count) {
+                        textTransformFreeRanges[i].offset += count;
+                        textTransformFreeRanges[i].size -= count;
+                    } else {
+                        textTransformFreeRanges.erase(textTransformFreeRanges.begin() + i);
+                    }
+                    return offset;
+                }
+            }
+            uint32_t offset = textTransformTop;
+            textTransformTop += count;
+            LCA_ASSERT(textTransformTop <= MAX_TEXT_LETTERS, "Renderer", "allocateTextTransformRange", "Exceeded MAX_TEXT_LETTERS.");
+            return offset;
+        }
+
+        void Renderer::freeTextTransformRange(uint32_t offset, uint32_t count) {
+            textTransformFreeRanges.push_back({offset, count});
+        }
+
+        // ── Text indirect range allocation ─────────────────────
+
+        uint32_t Renderer::allocateTextIndirectRange(TextPipelineBuffers& pb, uint32_t count) {
+            for (size_t i = 0; i < pb.freeRanges.size(); ++i) {
+                if (pb.freeRanges[i].size >= count) {
+                    uint32_t offset = pb.freeRanges[i].offset;
+                    if (pb.freeRanges[i].size > count) {
+                        pb.freeRanges[i].offset += count;
+                        pb.freeRanges[i].size -= count;
+                    } else {
+                        pb.freeRanges.erase(pb.freeRanges.begin() + i);
+                    }
+                    return offset;
+                }
+            }
+            uint32_t offset = pb.top;
+            pb.top += count;
+            LCA_ASSERT(pb.top <= MAX_TEXT_LETTERS, "Renderer", "allocateTextIndirectRange", "Exceeded text indirect capacity.");
+            return offset;
+        }
+
+        void Renderer::freeTextIndirectRange(TextPipelineBuffers& pb, uint32_t offset, uint32_t count) {
+            pb.freeRanges.push_back({offset, count});
+        }
+
+        // ── Text pipeline management ───────────────────────────
+
+        uint32_t Renderer::addTextPipeline(const std::string& name, TextPipeline&& pipeline) {
+            LCA_ASSERT(textPipelineMap.find(name) == textPipelineMap.end(), "Renderer", "addTextPipeline", "Text pipeline name already exists.");
+            LCA_ASSERT(textPipelines.size() < MAX_TEXT_PIPELINES, "Renderer", "addTextPipeline", "Exceeded MAX_TEXT_PIPELINES.");
+
+            textPipelines.push_back(std::move(pipeline));
+            const uint32_t id = static_cast<uint32_t>(textPipelines.size() - 1);
+            textPipelines.back().build();
+            textPipelineMap[name] = id;
+
+            TextPipelineBuffers& pb = textPipelineBufferData.emplace_back();
+            for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                pb.indirectBuffers[i] = createDualBuffer(MAX_TEXT_LETTERS, sizeof(VkDrawIndexedIndirectCommand),
+                    VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+                // Zero staging so all draw commands start with instanceCount=0
+                memset(pb.indirectBuffers[i].interface.pMemory, 0,
+                       MAX_TEXT_LETTERS * sizeof(VkDrawIndexedIndirectCommand));
+            }
+
+            // Sync zeroed staging to device-local
+            beginSingleCommand(singleCommand);
+            for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                pb.indirectBuffers[i].recordSync(singleCommand);
+            }
+            endSingleCommand(singleCommand);
+            submitSingleCommand(singleCommand);
+
+            return id;
+        }
+
+        uint32_t Renderer::getTextPipelineId(const std::string& name) const {
+            auto it = textPipelineMap.find(name);
+            LCA_ASSERT(it != textPipelineMap.end(), "Renderer", "getTextPipelineId", "Text pipeline name not found.");
+            return it->second;
+        }
+
+        // ── Text instance management ───────────────────────────
+
+        uint32_t Renderer::addTextInstance(const TextInstance& instance, uint32_t maxLetters) {
+            LCA_ASSERT(maxLetters > 0, "Renderer", "addTextInstance", "maxLetters must be > 0.");
+            LCA_ASSERT(instance.pipelineID < textPipelines.size(), "Renderer", "addTextInstance", "Invalid text pipeline ID.");
+
+            // Allocate slot
+            uint32_t slotId;
+            if (!freeTextSlots.empty()) {
+                slotId = freeTextSlots.back();
+                freeTextSlots.pop_back();
+            } else {
+                slotId = static_cast<uint32_t>(textSlots.size());
+                textSlots.emplace_back();
+            }
+
+            TextSlotData& slot = textSlots[slotId];
+            slot.instance = instance;
+            slot.maxLetters = maxLetters;
+            slot.active = true;
+
+            // Allocate ranges in text model buffer and pipeline indirect buffer
+            slot.transformBase = allocateTextTransformRange(maxLetters);
+            TextPipelineBuffers& pb = textPipelineBufferData[instance.pipelineID];
+            slot.indirectBase = allocateTextIndirectRange(pb, maxLetters);
+
+            // Get font data and compute per-letter TextModel + draw commands
+            const auto& fontData = GetAssetManager().getFontData(instance.fontID);
+            uint32_t letterIdx = 0;
+            float cursorX = 0.0f;
+
+            for (char ch : instance.text) {
+                if (letterIdx >= maxLetters) break;
+
+                auto charIt = fontData.characters.find(ch);
+                if (charIt == fontData.characters.end()) continue;
+                auto drawIt = fontData.drawInfos.find(ch);
+                if (drawIt == fontData.drawInfos.end()) continue;
+
+                const auto& fc = charIt->second;
+                const auto& di = drawIt->second;
+
+                // Build per-letter TextModel
+                TextModel tm{};
+                tm.localTransform = instance.localTransform * glm::translate(glm::mat4(1.0f), glm::vec3(cursorX, 0.0f, 0.0f));
+                tm.clipRect = instance.clipRect;
+                tm.baseTransformID = instance.transformID;
+                tm.materialId = fontData.materialId;
+
+                // Build draw command
+                VkDrawIndexedIndirectCommand cmd{};
+                cmd.indexCount = di.indexCount;
+                cmd.instanceCount = 1;
+                cmd.firstIndex = di.firstIndex;
+                cmd.vertexOffset = di.vertexOffset;
+                cmd.firstInstance = slot.transformBase + letterIdx;
+
+                // Write to all frames
+                for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+                    uint32_t tIdx = slot.transformBase + letterIdx;
+                    memcpy(
+                        static_cast<char*>(textModelsGPU[f].interface.pMemory) + tIdx * sizeof(TextModel),
+                        &tm, sizeof(TextModel));
+                    dirtyTextModelIndices[f].push_back(tIdx);
+
+                    uint32_t iIdx = slot.indirectBase + letterIdx;
+                    memcpy(
+                        static_cast<char*>(pb.indirectBuffers[f].interface.pMemory) + iIdx * sizeof(VkDrawIndexedIndirectCommand),
+                        &cmd, sizeof(VkDrawIndexedIndirectCommand));
+                    pb.dirtyIndirectIndices[f].push_back(iIdx);
+                }
+
+                // Advance cursor
+                cursorX += fc.advanceX;
+                letterIdx++;
+            }
+
+            // Zero remaining slots (instanceCount=0)
+            for (uint32_t i = letterIdx; i < maxLetters; i++) {
+                VkDrawIndexedIndirectCommand zeroCmd{};
+                for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+                    uint32_t iIdx = slot.indirectBase + i;
+                    memcpy(
+                        static_cast<char*>(pb.indirectBuffers[f].interface.pMemory) + iIdx * sizeof(VkDrawIndexedIndirectCommand),
+                        &zeroCmd, sizeof(VkDrawIndexedIndirectCommand));
+                    pb.dirtyIndirectIndices[f].push_back(iIdx);
+                }
+            }
+
+            slot.currentLetterCount = letterIdx;
+            return slotId;
+        }
+
+        void Renderer::updateTextInstance(uint32_t id, const TextInstance& instance) {
+            LCA_ASSERT(id < textSlots.size() && textSlots[id].active, "Renderer", "updateTextInstance", "Invalid text instance ID.");
+
+            TextSlotData& slot = textSlots[id];
+            const uint32_t oldPipelineID = slot.instance.pipelineID;
+            slot.instance = instance;
+
+            // If pipeline changed, free old indirect range and allocate on new pipeline
+            if (instance.pipelineID != oldPipelineID) {
+                TextPipelineBuffers& oldPb = textPipelineBufferData[oldPipelineID];
+                // Zero old indirect commands
+                VkDrawIndexedIndirectCommand zeroCmd{};
+                for (uint32_t i = 0; i < slot.maxLetters; i++) {
+                    for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+                        uint32_t iIdx = slot.indirectBase + i;
+                        memcpy(
+                            static_cast<char*>(oldPb.indirectBuffers[f].interface.pMemory) + iIdx * sizeof(VkDrawIndexedIndirectCommand),
+                            &zeroCmd, sizeof(VkDrawIndexedIndirectCommand));
+                        oldPb.dirtyIndirectIndices[f].push_back(iIdx);
+                    }
+                }
+                freeTextIndirectRange(oldPb, slot.indirectBase, slot.maxLetters);
+
+                TextPipelineBuffers& newPb = textPipelineBufferData[instance.pipelineID];
+                slot.indirectBase = allocateTextIndirectRange(newPb, slot.maxLetters);
+            }
+
+            TextPipelineBuffers& pb = textPipelineBufferData[instance.pipelineID];
+
+            // Recompute per-letter data
+            const auto& fontData = GetAssetManager().getFontData(instance.fontID);
+            uint32_t letterIdx = 0;
+            float cursorX = 0.0f;
+
+            for (char ch : instance.text) {
+                if (letterIdx >= slot.maxLetters) break;
+
+                auto charIt = fontData.characters.find(ch);
+                if (charIt == fontData.characters.end()) continue;
+                auto drawIt = fontData.drawInfos.find(ch);
+                if (drawIt == fontData.drawInfos.end()) continue;
+
+                const auto& fc = charIt->second;
+                const auto& di = drawIt->second;
+
+                TextModel tm{};
+                tm.localTransform = instance.localTransform * glm::translate(glm::mat4(1.0f), glm::vec3(cursorX, 0.0f, 0.0f));
+                tm.clipRect = instance.clipRect;
+                tm.baseTransformID = instance.transformID;
+                tm.materialId = fontData.materialId;
+
+                VkDrawIndexedIndirectCommand cmd{};
+                cmd.indexCount = di.indexCount;
+                cmd.instanceCount = 1;
+                cmd.firstIndex = di.firstIndex;
+                cmd.vertexOffset = di.vertexOffset;
+                cmd.firstInstance = slot.transformBase + letterIdx;
+
+                for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+                    uint32_t tIdx = slot.transformBase + letterIdx;
+                    memcpy(
+                        static_cast<char*>(textModelsGPU[f].interface.pMemory) + tIdx * sizeof(TextModel),
+                        &tm, sizeof(TextModel));
+                    dirtyTextModelIndices[f].push_back(tIdx);
+
+                    uint32_t iIdx = slot.indirectBase + letterIdx;
+                    memcpy(
+                        static_cast<char*>(pb.indirectBuffers[f].interface.pMemory) + iIdx * sizeof(VkDrawIndexedIndirectCommand),
+                        &cmd, sizeof(VkDrawIndexedIndirectCommand));
+                    pb.dirtyIndirectIndices[f].push_back(iIdx);
+                }
+
+                cursorX += fc.advanceX;
+                letterIdx++;
+            }
+
+            // Zero remaining
+            for (uint32_t i = letterIdx; i < slot.maxLetters; i++) {
+                VkDrawIndexedIndirectCommand zeroCmd{};
+                for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+                    uint32_t iIdx = slot.indirectBase + i;
+                    memcpy(
+                        static_cast<char*>(pb.indirectBuffers[f].interface.pMemory) + iIdx * sizeof(VkDrawIndexedIndirectCommand),
+                        &zeroCmd, sizeof(VkDrawIndexedIndirectCommand));
+                    pb.dirtyIndirectIndices[f].push_back(iIdx);
+                }
+            }
+
+            slot.currentLetterCount = letterIdx;
+        }
+
+        void Renderer::removeTextInstance(uint32_t id) {
+            LCA_ASSERT(id < textSlots.size() && textSlots[id].active, "Renderer", "removeTextInstance", "Invalid text instance ID.");
+
+            TextSlotData& slot = textSlots[id];
+            TextPipelineBuffers& pb = textPipelineBufferData[slot.instance.pipelineID];
+
+            // Zero all draw commands for this instance
+            VkDrawIndexedIndirectCommand zeroCmd{};
+            for (uint32_t i = 0; i < slot.maxLetters; i++) {
+                for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+                    uint32_t iIdx = slot.indirectBase + i;
+                    memcpy(
+                        static_cast<char*>(pb.indirectBuffers[f].interface.pMemory) + iIdx * sizeof(VkDrawIndexedIndirectCommand),
+                        &zeroCmd, sizeof(VkDrawIndexedIndirectCommand));
+                    pb.dirtyIndirectIndices[f].push_back(iIdx);
+                }
+            }
+
+            // Free ranges
+            freeTextIndirectRange(pb, slot.indirectBase, slot.maxLetters);
+            freeTextTransformRange(slot.transformBase, slot.maxLetters);
+
+            slot.active = false;
+            freeTextSlots.push_back(id);
+        }
+
+        // ── GUI Text pipeline/instance management ──────────────────────────────
+
+        uint32_t Renderer::addGuiTextPipeline(const std::string& name, TextPipeline&& pipeline) {
+            LCA_ASSERT(guiTextPipelineMap.find(name) == guiTextPipelineMap.end(), "Renderer", "addGuiTextPipeline", "GUI text pipeline name already exists.");
+            LCA_ASSERT(guiTextPipelines.size() < MAX_TEXT_PIPELINES, "Renderer", "addGuiTextPipeline", "Exceeded MAX_TEXT_PIPELINES.");
+
+            guiTextPipelines.push_back(std::move(pipeline));
+            const uint32_t id = static_cast<uint32_t>(guiTextPipelines.size() - 1);
+            guiTextPipelines.back().build();
+            guiTextPipelineMap[name] = id;
+
+            TextPipelineBuffers& pb = guiTextPipelineBufferData.emplace_back();
+            for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                pb.indirectBuffers[i] = createDualBuffer(MAX_TEXT_LETTERS, sizeof(VkDrawIndexedIndirectCommand),
+                    VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+                memset(pb.indirectBuffers[i].interface.pMemory, 0,
+                       MAX_TEXT_LETTERS * sizeof(VkDrawIndexedIndirectCommand));
+            }
+
+            beginSingleCommand(singleCommand);
+            for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                pb.indirectBuffers[i].recordSync(singleCommand);
+            }
+            endSingleCommand(singleCommand);
+            submitSingleCommand(singleCommand);
+
+            return id;
+        }
+
+        uint32_t Renderer::getGuiTextPipelineId(const std::string& name) const {
+            auto it = guiTextPipelineMap.find(name);
+            LCA_ASSERT(it != guiTextPipelineMap.end(), "Renderer", "getGuiTextPipelineId", "GUI text pipeline name not found.");
+            return it->second;
+        }
+
+        uint32_t Renderer::addGuiTextInstance(const TextInstance& instance, uint32_t maxLetters) {
+            LCA_ASSERT(maxLetters > 0, "Renderer", "addGuiTextInstance", "maxLetters must be > 0.");
+            LCA_ASSERT(instance.pipelineID < guiTextPipelines.size(), "Renderer", "addGuiTextInstance", "Invalid GUI text pipeline ID.");
+
+            uint32_t slotId;
+            if (!freeGuiTextSlots.empty()) {
+                slotId = freeGuiTextSlots.back();
+                freeGuiTextSlots.pop_back();
+            } else {
+                slotId = static_cast<uint32_t>(guiTextSlots.size());
+                guiTextSlots.emplace_back();
+            }
+
+            TextSlotData& slot = guiTextSlots[slotId];
+            slot.instance = instance;
+            slot.maxLetters = maxLetters;
+            slot.active = true;
+
+            slot.transformBase = allocateTextTransformRange(maxLetters);
+            TextPipelineBuffers& pb = guiTextPipelineBufferData[instance.pipelineID];
+            slot.indirectBase = allocateTextIndirectRange(pb, maxLetters);
+
+            const auto& fontData = GetAssetManager().getFontData(instance.fontID);
+            uint32_t letterIdx = 0;
+            float cursorX = 0.0f;
+
+            for (char ch : instance.text) {
+                if (letterIdx >= maxLetters) break;
+
+                auto charIt = fontData.characters.find(ch);
+                if (charIt == fontData.characters.end()) continue;
+                auto drawIt = fontData.drawInfos.find(ch);
+                if (drawIt == fontData.drawInfos.end()) continue;
+
+                const auto& fc = charIt->second;
+                const auto& di = drawIt->second;
+
+                TextModel tm{};
+                tm.localTransform = instance.localTransform * glm::translate(glm::mat4(1.0f), glm::vec3(cursorX, 0.0f, 0.0f));
+                tm.clipRect = instance.clipRect;
+                tm.baseTransformID = instance.transformID;
+                tm.materialId = fontData.materialId;
+
+                VkDrawIndexedIndirectCommand cmd{};
+                cmd.indexCount = di.indexCount;
+                cmd.instanceCount = 1;
+                cmd.firstIndex = di.firstIndex;
+                cmd.vertexOffset = di.vertexOffset;
+                cmd.firstInstance = slot.transformBase + letterIdx;
+
+                for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+                    uint32_t tIdx = slot.transformBase + letterIdx;
+                    memcpy(
+                        static_cast<char*>(textModelsGPU[f].interface.pMemory) + tIdx * sizeof(TextModel),
+                        &tm, sizeof(TextModel));
+                    dirtyTextModelIndices[f].push_back(tIdx);
+
+                    uint32_t iIdx = slot.indirectBase + letterIdx;
+                    memcpy(
+                        static_cast<char*>(pb.indirectBuffers[f].interface.pMemory) + iIdx * sizeof(VkDrawIndexedIndirectCommand),
+                        &cmd, sizeof(VkDrawIndexedIndirectCommand));
+                    pb.dirtyIndirectIndices[f].push_back(iIdx);
+                }
+
+                cursorX += fc.advanceX;
+                letterIdx++;
+            }
+
+            for (uint32_t i = letterIdx; i < maxLetters; i++) {
+                VkDrawIndexedIndirectCommand zeroCmd{};
+                for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+                    uint32_t iIdx = slot.indirectBase + i;
+                    memcpy(
+                        static_cast<char*>(pb.indirectBuffers[f].interface.pMemory) + iIdx * sizeof(VkDrawIndexedIndirectCommand),
+                        &zeroCmd, sizeof(VkDrawIndexedIndirectCommand));
+                    pb.dirtyIndirectIndices[f].push_back(iIdx);
+                }
+            }
+
+            slot.currentLetterCount = letterIdx;
+            return slotId;
+        }
+
+        void Renderer::updateGuiTextInstance(uint32_t id, const TextInstance& instance) {
+            LCA_ASSERT(id < guiTextSlots.size() && guiTextSlots[id].active, "Renderer", "updateGuiTextInstance", "Invalid GUI text instance ID.");
+
+            TextSlotData& slot = guiTextSlots[id];
+            const uint32_t oldPipelineID = slot.instance.pipelineID;
+            slot.instance = instance;
+
+            if (instance.pipelineID != oldPipelineID) {
+                TextPipelineBuffers& oldPb = guiTextPipelineBufferData[oldPipelineID];
+                VkDrawIndexedIndirectCommand zeroCmd{};
+                for (uint32_t i = 0; i < slot.maxLetters; i++) {
+                    for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+                        uint32_t iIdx = slot.indirectBase + i;
+                        memcpy(
+                            static_cast<char*>(oldPb.indirectBuffers[f].interface.pMemory) + iIdx * sizeof(VkDrawIndexedIndirectCommand),
+                            &zeroCmd, sizeof(VkDrawIndexedIndirectCommand));
+                        oldPb.dirtyIndirectIndices[f].push_back(iIdx);
+                    }
+                }
+                freeTextIndirectRange(oldPb, slot.indirectBase, slot.maxLetters);
+
+                TextPipelineBuffers& newPb = guiTextPipelineBufferData[instance.pipelineID];
+                slot.indirectBase = allocateTextIndirectRange(newPb, slot.maxLetters);
+            }
+
+            TextPipelineBuffers& pb = guiTextPipelineBufferData[instance.pipelineID];
+
+            const auto& fontData = GetAssetManager().getFontData(instance.fontID);
+            uint32_t letterIdx = 0;
+            float cursorX = 0.0f;
+
+            for (char ch : instance.text) {
+                if (letterIdx >= slot.maxLetters) break;
+
+                auto charIt = fontData.characters.find(ch);
+                if (charIt == fontData.characters.end()) continue;
+                auto drawIt = fontData.drawInfos.find(ch);
+                if (drawIt == fontData.drawInfos.end()) continue;
+
+                const auto& fc = charIt->second;
+                const auto& di = drawIt->second;
+
+                TextModel tm{};
+                tm.localTransform = instance.localTransform * glm::translate(glm::mat4(1.0f), glm::vec3(cursorX, 0.0f, 0.0f));
+                tm.clipRect = instance.clipRect;
+                tm.baseTransformID = instance.transformID;
+                tm.materialId = fontData.materialId;
+
+                VkDrawIndexedIndirectCommand cmd{};
+                cmd.indexCount = di.indexCount;
+                cmd.instanceCount = 1;
+                cmd.firstIndex = di.firstIndex;
+                cmd.vertexOffset = di.vertexOffset;
+                cmd.firstInstance = slot.transformBase + letterIdx;
+
+                for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+                    uint32_t tIdx = slot.transformBase + letterIdx;
+                    memcpy(
+                        static_cast<char*>(textModelsGPU[f].interface.pMemory) + tIdx * sizeof(TextModel),
+                        &tm, sizeof(TextModel));
+                    dirtyTextModelIndices[f].push_back(tIdx);
+
+                    uint32_t iIdx = slot.indirectBase + letterIdx;
+                    memcpy(
+                        static_cast<char*>(pb.indirectBuffers[f].interface.pMemory) + iIdx * sizeof(VkDrawIndexedIndirectCommand),
+                        &cmd, sizeof(VkDrawIndexedIndirectCommand));
+                    pb.dirtyIndirectIndices[f].push_back(iIdx);
+                }
+
+                cursorX += fc.advanceX;
+                letterIdx++;
+            }
+
+            for (uint32_t i = letterIdx; i < slot.maxLetters; i++) {
+                VkDrawIndexedIndirectCommand zeroCmd{};
+                for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+                    uint32_t iIdx = slot.indirectBase + i;
+                    memcpy(
+                        static_cast<char*>(pb.indirectBuffers[f].interface.pMemory) + iIdx * sizeof(VkDrawIndexedIndirectCommand),
+                        &zeroCmd, sizeof(VkDrawIndexedIndirectCommand));
+                    pb.dirtyIndirectIndices[f].push_back(iIdx);
+                }
+            }
+
+            slot.currentLetterCount = letterIdx;
+        }
+
+        void Renderer::removeGuiTextInstance(uint32_t id) {
+            LCA_ASSERT(id < guiTextSlots.size() && guiTextSlots[id].active, "Renderer", "removeGuiTextInstance", "Invalid GUI text instance ID.");
+
+            TextSlotData& slot = guiTextSlots[id];
+            TextPipelineBuffers& pb = guiTextPipelineBufferData[slot.instance.pipelineID];
+
+            VkDrawIndexedIndirectCommand zeroCmd{};
+            for (uint32_t i = 0; i < slot.maxLetters; i++) {
+                for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+                    uint32_t iIdx = slot.indirectBase + i;
+                    memcpy(
+                        static_cast<char*>(pb.indirectBuffers[f].interface.pMemory) + iIdx * sizeof(VkDrawIndexedIndirectCommand),
+                        &zeroCmd, sizeof(VkDrawIndexedIndirectCommand));
+                    pb.dirtyIndirectIndices[f].push_back(iIdx);
+                }
+            }
+
+            freeTextIndirectRange(pb, slot.indirectBase, slot.maxLetters);
+            freeTextTransformRange(slot.transformBase, slot.maxLetters);
+
+            slot.active = false;
+            freeGuiTextSlots.push_back(id);
+        }
+
+        // ── GUI Rect pipeline management ───────────────────────────
+
+        uint32_t Renderer::addGuiRectPipeline(const std::string& name, GuiRectPipeline&& pipeline) {
+            LCA_ASSERT(guiRectPipelineMap.find(name) == guiRectPipelineMap.end(), "Renderer", "addGuiRectPipeline", "GUI rect pipeline name already exists.");
+            LCA_ASSERT(guiRectPipelines.size() < MAX_GUI_RECT_PIPELINES, "Renderer", "addGuiRectPipeline", "Exceeded MAX_GUI_RECT_PIPELINES.");
+
+            guiRectPipelines.push_back(std::move(pipeline));
+            const uint32_t id = static_cast<uint32_t>(guiRectPipelines.size() - 1);
+            guiRectPipelines.back().build();
+            guiRectPipelineMap[name] = id;
+
+            // Create the unit quad mesh on first pipeline add
+            if (guiRectQuadMeshID == UINT32_MAX) {
+                std::vector<Vertex::Mesh> quadVerts = {
+                    {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {1,1,1,1}, {0.0f, 0.0f}},
+                    {{1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {1,1,1,1}, {1.0f, 0.0f}},
+                    {{1.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {1,1,1,1}, {1.0f, 1.0f}},
+                    {{0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {1,1,1,1}, {0.0f, 1.0f}},
+                };
+                std::vector<uint32_t> quadIndices = {0, 1, 2, 2, 3, 0};
+                guiRectQuadMeshID = GetAssetManager().addMesh("_gui_rect_quad", quadVerts, quadIndices);
+            }
+
+            GuiRectPipelineBuffers& pb = guiRectPipelineBufferData.emplace_back();
+            for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                pb.indirectBuffers[i] = createDualBuffer(MAX_GUI_RECTS, sizeof(VkDrawIndexedIndirectCommand),
+                    VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+                memset(pb.indirectBuffers[i].interface.pMemory, 0,
+                       MAX_GUI_RECTS * sizeof(VkDrawIndexedIndirectCommand));
+            }
+
+            beginSingleCommand(singleCommand);
+            for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+                pb.indirectBuffers[i].recordSync(singleCommand);
+            }
+            endSingleCommand(singleCommand);
+            submitSingleCommand(singleCommand);
+
+            return id;
+        }
+
+        uint32_t Renderer::getGuiRectPipelineId(const std::string& name) const {
+            auto it = guiRectPipelineMap.find(name);
+            LCA_ASSERT(it != guiRectPipelineMap.end(), "Renderer", "getGuiRectPipelineId", "GUI rect pipeline name not found.");
+            return it->second;
+        }
+
+        uint32_t Renderer::addGuiRectInstance(const GuiRectInstance& instance) {
+            LCA_ASSERT(instance.pipelineID < guiRectPipelines.size(), "Renderer", "addGuiRectInstance", "Invalid GUI rect pipeline ID.");
+
+            uint32_t slotId;
+            if (!freeGuiRectSlots.empty()) {
+                slotId = freeGuiRectSlots.back();
+                freeGuiRectSlots.pop_back();
+            } else {
+                slotId = static_cast<uint32_t>(guiRectSlots.size());
+                guiRectSlots.emplace_back();
+            }
+
+            GuiRectSlotData& slot = guiRectSlots[slotId];
+            slot.instance = instance;
+            slot.active = true;
+
+            // Allocate one indirect slot in the pipeline
+            GuiRectPipelineBuffers& pb = guiRectPipelineBufferData[instance.pipelineID];
+            uint32_t indirectIdx;
+            if (!pb.freeRanges.empty()) {
+                indirectIdx = pb.freeRanges.back().offset;
+                if (pb.freeRanges.back().size > 1) {
+                    pb.freeRanges.back().offset++;
+                    pb.freeRanges.back().size--;
+                } else {
+                    pb.freeRanges.pop_back();
+                }
+            } else {
+                indirectIdx = pb.top++;
+                LCA_ASSERT(pb.top <= MAX_GUI_RECTS, "Renderer", "addGuiRectInstance", "Exceeded MAX_GUI_RECTS.");
+            }
+            guiRectSlotToIndirect[slotId] = indirectIdx;
+
+            // Build GPU model data
+            GuiRectModel model{};
+            model.rect = instance.rect;
+            model.params = glm::vec4(
+                instance.borderWidth,
+                instance.cornerRadius,
+                std::bit_cast<float>(static_cast<uint32_t>(instance.materialId)),
+                std::bit_cast<float>(static_cast<uint32_t>(instance.borderMaterialId)));
+            model.clipRect = instance.clipRect;
+            model.baseTransformID = instance.transformID;
+
+            // Build indirect draw command using the shared unit quad mesh
+            auto meshInfo = GetAssetManager().getMeshInfo(guiRectQuadMeshID);
+            VkDrawIndexedIndirectCommand cmd{};
+            cmd.indexCount = meshInfo.indexCount;
+            cmd.instanceCount = 1;
+            cmd.firstIndex = meshInfo.firstIndex;
+            cmd.vertexOffset = meshInfo.vertexOffset;
+            cmd.firstInstance = slotId;  // gl_InstanceIndex → index into GuiRectModel SSBO
+
+            for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+                memcpy(
+                    static_cast<char*>(guiRectModelsGPU[f].interface.pMemory) + slotId * sizeof(GuiRectModel),
+                    &model, sizeof(GuiRectModel));
+                dirtyGuiRectModelIndices[f].push_back(slotId);
+
+                memcpy(
+                    static_cast<char*>(pb.indirectBuffers[f].interface.pMemory) + indirectIdx * sizeof(VkDrawIndexedIndirectCommand),
+                    &cmd, sizeof(VkDrawIndexedIndirectCommand));
+                pb.dirtyIndirectIndices[f].push_back(indirectIdx);
+            }
+
+            return slotId;
+        }
+
+        void Renderer::updateGuiRectInstance(uint32_t id, const GuiRectInstance& instance) {
+            LCA_ASSERT(id < guiRectSlots.size() && guiRectSlots[id].active, "Renderer", "updateGuiRectInstance", "Invalid GUI rect instance ID.");
+
+            GuiRectSlotData& slot = guiRectSlots[id];
+            const uint32_t oldPipelineID = slot.instance.pipelineID;
+            slot.instance = instance;
+
+            uint32_t indirectIdx = guiRectSlotToIndirect[id];
+
+            // Handle pipeline change
+            if (instance.pipelineID != oldPipelineID) {
+                // Zero old indirect command
+                GuiRectPipelineBuffers& oldPb = guiRectPipelineBufferData[oldPipelineID];
+                VkDrawIndexedIndirectCommand zeroCmd{};
+                for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+                    memcpy(
+                        static_cast<char*>(oldPb.indirectBuffers[f].interface.pMemory) + indirectIdx * sizeof(VkDrawIndexedIndirectCommand),
+                        &zeroCmd, sizeof(VkDrawIndexedIndirectCommand));
+                    oldPb.dirtyIndirectIndices[f].push_back(indirectIdx);
+                }
+                oldPb.freeRanges.push_back({indirectIdx, 1});
+
+                // Allocate in new pipeline
+                GuiRectPipelineBuffers& newPb = guiRectPipelineBufferData[instance.pipelineID];
+                if (!newPb.freeRanges.empty()) {
+                    indirectIdx = newPb.freeRanges.back().offset;
+                    if (newPb.freeRanges.back().size > 1) {
+                        newPb.freeRanges.back().offset++;
+                        newPb.freeRanges.back().size--;
+                    } else {
+                        newPb.freeRanges.pop_back();
+                    }
+                } else {
+                    indirectIdx = newPb.top++;
+                    LCA_ASSERT(newPb.top <= MAX_GUI_RECTS, "Renderer", "updateGuiRectInstance", "Exceeded MAX_GUI_RECTS.");
+                }
+                guiRectSlotToIndirect[id] = indirectIdx;
+            }
+
+            // Update model data
+            GuiRectModel model{};
+            model.rect = instance.rect;
+            model.params = glm::vec4(
+                instance.borderWidth,
+                instance.cornerRadius,
+                std::bit_cast<float>(static_cast<uint32_t>(instance.materialId)),
+                std::bit_cast<float>(static_cast<uint32_t>(instance.borderMaterialId)));
+            model.clipRect = instance.clipRect;
+            model.baseTransformID = instance.transformID;
+
+            // Update indirect command
+            GuiRectPipelineBuffers& pb = guiRectPipelineBufferData[instance.pipelineID];
+            auto meshInfo = GetAssetManager().getMeshInfo(guiRectQuadMeshID);
+            VkDrawIndexedIndirectCommand cmd{};
+            cmd.indexCount = meshInfo.indexCount;
+            cmd.instanceCount = 1;
+            cmd.firstIndex = meshInfo.firstIndex;
+            cmd.vertexOffset = meshInfo.vertexOffset;
+            cmd.firstInstance = id;
+
+            for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+                memcpy(
+                    static_cast<char*>(guiRectModelsGPU[f].interface.pMemory) + id * sizeof(GuiRectModel),
+                    &model, sizeof(GuiRectModel));
+                dirtyGuiRectModelIndices[f].push_back(id);
+
+                memcpy(
+                    static_cast<char*>(pb.indirectBuffers[f].interface.pMemory) + indirectIdx * sizeof(VkDrawIndexedIndirectCommand),
+                    &cmd, sizeof(VkDrawIndexedIndirectCommand));
+                pb.dirtyIndirectIndices[f].push_back(indirectIdx);
+            }
+        }
+
+        void Renderer::removeGuiRectInstance(uint32_t id) {
+            LCA_ASSERT(id < guiRectSlots.size() && guiRectSlots[id].active, "Renderer", "removeGuiRectInstance", "Invalid GUI rect instance ID.");
+
+            GuiRectSlotData& slot = guiRectSlots[id];
+            GuiRectPipelineBuffers& pb = guiRectPipelineBufferData[slot.instance.pipelineID];
+            uint32_t indirectIdx = guiRectSlotToIndirect[id];
+
+            VkDrawIndexedIndirectCommand zeroCmd{};
+            for (uint32_t f = 0; f < MAX_FRAMES_IN_FLIGHT; f++) {
+                memcpy(
+                    static_cast<char*>(pb.indirectBuffers[f].interface.pMemory) + indirectIdx * sizeof(VkDrawIndexedIndirectCommand),
+                    &zeroCmd, sizeof(VkDrawIndexedIndirectCommand));
+                pb.dirtyIndirectIndices[f].push_back(indirectIdx);
+            }
+
+            pb.freeRanges.push_back({indirectIdx, 1});
+            guiRectSlotToIndirect.erase(id);
+
+            slot.active = false;
+            freeGuiRectSlots.push_back(id);
         }
     }
 }

@@ -291,6 +291,230 @@ namespace Lca
             vmaDestroyImage(vmaAllocator, texture.vkImage, texture.vmaAllocation);)
         }
 
+        // Creates a texture with a full mip-chain generated on the GPU via
+        // vkCmdBlitImage (LINEAR filter).  The sampler uses maxLod = full chain
+        // so the driver picks the best LOD automatically, giving correct
+        // filtering even when a large texture is displayed in a small rect.
+        Texture createTextureMipmapped(uint32_t width, uint32_t height, void* pixels) {
+            Texture image;
+            image.width  = width;
+            image.height = height;
+
+            const uint32_t mipLevels = static_cast<uint32_t>(
+                std::floor(std::log2(static_cast<double>(std::max(width, height))))) + 1u;
+
+            // ── Image allocation ─────────────────────────────────────────────
+            // TRANSFER_SRC_BIT is required so each mip level can be blitted FROM
+            VkImageCreateInfo createInfo{};
+            createInfo.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+            createInfo.imageType     = VK_IMAGE_TYPE_2D;
+            createInfo.extent        = { width, height, 1 };
+            createInfo.mipLevels     = mipLevels;
+            createInfo.arrayLayers   = 1;
+            createInfo.format        = VK_FORMAT_R8G8B8A8_SRGB;
+            createInfo.tiling        = VK_IMAGE_TILING_OPTIMAL;
+            createInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            createInfo.usage         = VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+                                     | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+                                     | VK_IMAGE_USAGE_SAMPLED_BIT;
+            createInfo.samples       = VK_SAMPLE_COUNT_1_BIT;
+            createInfo.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+
+            VmaAllocationCreateInfo allocInfo{};
+            allocInfo.usage    = VMA_MEMORY_USAGE_AUTO;
+            allocInfo.flags    = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+            allocInfo.priority = 1.f;
+
+            LCA_VK_MUTEX(
+            LCA_CHECK_VULKAN(
+                vmaCreateImage(vmaAllocator, &createInfo, &allocInfo,
+                               &image.vkImage, &image.vmaAllocation, nullptr),
+                "createTextureMipmapped", "vmaCreateImage"))
+
+            // ── Image view over ALL mip levels ───────────────────────────────
+            VkImageViewCreateInfo ivCI{};
+            ivCI.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            ivCI.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
+            ivCI.format                          = VK_FORMAT_R8G8B8A8_SRGB;
+            ivCI.image                           = image.vkImage;
+            ivCI.components.r                    = VK_COMPONENT_SWIZZLE_IDENTITY;
+            ivCI.components.g                    = VK_COMPONENT_SWIZZLE_IDENTITY;
+            ivCI.components.b                    = VK_COMPONENT_SWIZZLE_IDENTITY;
+            ivCI.components.a                    = VK_COMPONENT_SWIZZLE_IDENTITY;
+            ivCI.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+            ivCI.subresourceRange.baseMipLevel   = 0;
+            ivCI.subresourceRange.levelCount     = mipLevels;
+            ivCI.subresourceRange.baseArrayLayer = 0;
+            ivCI.subresourceRange.layerCount     = 1;
+
+            LCA_VK_MUTEX(
+            LCA_CHECK_VULKAN(
+                vkCreateImageView(vkDevice, &ivCI, nullptr, &image.vkImageView),
+                "createTextureMipmapped", "vkCreateImageView"))
+
+            // ── Sampler: uses the full mip-chain ─────────────────────────────
+            VkSamplerCreateInfo sampCI{};
+            sampCI.sType            = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+            sampCI.minFilter        = VK_FILTER_LINEAR;
+            sampCI.magFilter        = VK_FILTER_LINEAR;
+            sampCI.addressModeU     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            sampCI.addressModeV     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            sampCI.addressModeW     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            sampCI.anisotropyEnable = VK_TRUE;
+            sampCI.maxAnisotropy    = vkPhysicalDeviceProperties.limits.maxSamplerAnisotropy;
+            sampCI.borderColor      = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+            sampCI.mipmapMode       = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+            sampCI.mipLodBias       = 0.f;
+            sampCI.minLod           = 0.f;
+            sampCI.maxLod           = static_cast<float>(mipLevels); // ← key fix
+
+            LCA_VK_MUTEX(
+            LCA_CHECK_VULKAN(
+                vkCreateSampler(vkDevice, &sampCI, nullptr, &image.vkSampler),
+                "createTextureMipmapped", "vkCreateSampler"))
+
+            // ── Staging buffer ────────────────────────────────────────────────
+            BufferInterface copyBuffer =
+                createBufferInterface(width * height, 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+            memcpy(copyBuffer.pMemory, pixels, static_cast<size_t>(width) * height * 4);
+
+            // ── GPU commands: upload mip 0, then blit down the chain ─────────
+            // Use lock_guard directly — struct initializer-list commas inside {}
+            // are not protected in the LCA_VK_MUTEX macro expansion.
+            {
+                std::lock_guard<std::recursive_mutex> guard(vulkanCommandMutex);
+                beginSingleCommand(singleCommand);
+                VkCommandBuffer cmd = singleCommand.vkCommandBuffer;
+
+                // Transition ALL mip levels UNDEFINED → TRANSFER_DST
+                VkImageMemoryBarrier allDst{};
+                allDst.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                allDst.oldLayout                       = VK_IMAGE_LAYOUT_UNDEFINED;
+                allDst.newLayout                       = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                allDst.srcAccessMask                   = 0;
+                allDst.dstAccessMask                   = VK_ACCESS_TRANSFER_WRITE_BIT;
+                allDst.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+                allDst.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+                allDst.image                           = image.vkImage;
+                allDst.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+                allDst.subresourceRange.baseMipLevel   = 0;
+                allDst.subresourceRange.levelCount     = mipLevels;
+                allDst.subresourceRange.baseArrayLayer = 0;
+                allDst.subresourceRange.layerCount     = 1;
+                vkCmdPipelineBarrier(cmd,
+                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    0, 0, nullptr, 0, nullptr, 1, &allDst);
+
+                // Copy staging buffer → mip level 0
+                VkBufferImageCopy region{};
+                region.imageSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+                region.imageSubresource.mipLevel       = 0;
+                region.imageSubresource.baseArrayLayer = 0;
+                region.imageSubresource.layerCount     = 1;
+                region.imageExtent                     = { width, height, 1 };
+                vkCmdCopyBufferToImage(cmd, copyBuffer.vkBuffer, image.vkImage,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+                // Generate mip levels 1..N-1 via blits
+                int32_t mipW = static_cast<int32_t>(width);
+                int32_t mipH = static_cast<int32_t>(height);
+
+                for (uint32_t i = 1; i < mipLevels; ++i) {
+                    // Transition previous level: DST → SRC (ready to blit from)
+                    VkImageMemoryBarrier toSrc{};
+                    toSrc.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                    toSrc.oldLayout                       = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                    toSrc.newLayout                       = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                    toSrc.srcAccessMask                   = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    toSrc.dstAccessMask                   = VK_ACCESS_TRANSFER_READ_BIT;
+                    toSrc.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+                    toSrc.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+                    toSrc.image                           = image.vkImage;
+                    toSrc.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+                    toSrc.subresourceRange.baseMipLevel   = i - 1;
+                    toSrc.subresourceRange.levelCount     = 1;
+                    toSrc.subresourceRange.baseArrayLayer = 0;
+                    toSrc.subresourceRange.layerCount     = 1;
+                    vkCmdPipelineBarrier(cmd,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        0, 0, nullptr, 0, nullptr, 1, &toSrc);
+
+                    // Blit from level i-1 → level i (half resolution)
+                    int32_t nextW = mipW > 1 ? mipW / 2 : 1;
+                    int32_t nextH = mipH > 1 ? mipH / 2 : 1;
+
+                    VkImageBlit blit{};
+                    blit.srcSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+                    blit.srcSubresource.mipLevel       = i - 1;
+                    blit.srcSubresource.baseArrayLayer = 0;
+                    blit.srcSubresource.layerCount     = 1;
+                    blit.srcOffsets[0]                 = { 0, 0, 0 };
+                    blit.srcOffsets[1]                 = { mipW, mipH, 1 };
+                    blit.dstSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+                    blit.dstSubresource.mipLevel       = i;
+                    blit.dstSubresource.baseArrayLayer = 0;
+                    blit.dstSubresource.layerCount     = 1;
+                    blit.dstOffsets[0]                 = { 0, 0, 0 };
+                    blit.dstOffsets[1]                 = { nextW, nextH, 1 };
+                    vkCmdBlitImage(cmd,
+                        image.vkImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        image.vkImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        1, &blit, VK_FILTER_LINEAR);
+
+                    // Transition level i-1 → SHADER_READ_ONLY — done with it
+                    VkImageMemoryBarrier toRead{};
+                    toRead.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                    toRead.oldLayout                       = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                    toRead.newLayout                       = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                    toRead.srcAccessMask                   = VK_ACCESS_TRANSFER_READ_BIT;
+                    toRead.dstAccessMask                   = VK_ACCESS_SHADER_READ_BIT;
+                    toRead.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+                    toRead.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+                    toRead.image                           = image.vkImage;
+                    toRead.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+                    toRead.subresourceRange.baseMipLevel   = i - 1;
+                    toRead.subresourceRange.levelCount     = 1;
+                    toRead.subresourceRange.baseArrayLayer = 0;
+                    toRead.subresourceRange.layerCount     = 1;
+                    vkCmdPipelineBarrier(cmd,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                        0, 0, nullptr, 0, nullptr, 1, &toRead);
+
+                    mipW = nextW;
+                    mipH = nextH;
+                }
+
+                // Transition the last mip level DST → SHADER_READ_ONLY
+                VkImageMemoryBarrier lastMip{};
+                lastMip.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                lastMip.oldLayout                       = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                lastMip.newLayout                       = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                lastMip.srcAccessMask                   = VK_ACCESS_TRANSFER_WRITE_BIT;
+                lastMip.dstAccessMask                   = VK_ACCESS_SHADER_READ_BIT;
+                lastMip.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+                lastMip.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
+                lastMip.image                           = image.vkImage;
+                lastMip.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+                lastMip.subresourceRange.baseMipLevel   = mipLevels - 1;
+                lastMip.subresourceRange.levelCount     = 1;
+                lastMip.subresourceRange.baseArrayLayer = 0;
+                lastMip.subresourceRange.layerCount     = 1;
+                vkCmdPipelineBarrier(cmd,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                    0, 0, nullptr, 0, nullptr, 1, &lastMip);
+
+                endSingleCommand(singleCommand);
+                submitSingleCommand(singleCommand);
+            }
+
+            destroyBufferInterface(copyBuffer);
+            return image;
+        }
+
         Texture createFontTexture(uint32_t width, uint32_t height, void* pixels){
             Texture image;
             image.width = width;

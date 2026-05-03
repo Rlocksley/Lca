@@ -213,7 +213,7 @@ All three variants require a `Transform` and a `BoxCollider` on the same entity.
         entity.set<Component::Velocity>({});
         entity.set<Component::BoxCollider>({ halfExtent });
         entity.set<Component::DynamicRigidBody>({
-            .objectLayer  = Layers::DYNAMIC_OBJECTS,
+            .objectLayer  = Layers::DYNAMIC_ENVIRONMENT,
             .mass         = 5.0f,
             .friction     = 0.5f,
             .restitution  = 0.2f
@@ -223,7 +223,7 @@ All three variants require a `Transform` and a `BoxCollider` on the same entity.
         // Kinematic — moved by game code, collides with dynamic bodies
         entity.set<Component::BoxCollider>({ halfExtent });
         entity.set<Component::KinematicRigidBody>({
-            .objectLayer = Layers::KINEMATIC_OBJECTS,
+            .objectLayer = Layers::DYNAMIC_ENVIRONMENT,
             .friction    = 0.5f
         });
 ```
@@ -288,9 +288,13 @@ Contributing
 - PRs welcome.
 
 TODO
-- Path-Tracing
++ indirect mesh rendering
++ indirect skeleton mesh rendering
++ indirect Particle Renderering
++ Animation
++ Physics
+- Path-Finding
 - GUI
-- Particle-System
     
 License
 - See the top-level `LICENSE` file in this repo.

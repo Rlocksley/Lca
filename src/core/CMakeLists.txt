@@ -50,6 +50,8 @@ PipelineLayouts.cpp
 #Light.hpp
 #Light.cpp
 Physics.hpp
+Navigation.hpp
+Navigation.cpp
 Core.hpp
 Core.cpp
 Pipeline.hpp
@@ -87,8 +89,16 @@ SkeletonDepthPipeline.hpp
 SkeletonDepthPipeline.cpp
 LightCullPipeline.hpp
 LightCullPipeline.cpp
+TextPipeline.hpp
+TextPipeline.cpp
+GuiRectPipeline.hpp
+GuiRectPipeline.cpp
 Physics.hpp
 Physics.cpp
+)
+
+target_include_directories(lca_core PUBLIC
+    $<TARGET_PROPERTY:RecastNavigation::Detour,INTERFACE_INCLUDE_DIRECTORIES>
 )
 
 
@@ -99,4 +109,7 @@ target_link_libraries(lca_core PUBLIC
     glfw            # The imported target for GLFW (note: glfw, not glfw3)
     assimp::assimp  # The imported target for Assimp
     Jolt::Jolt      # The imported target for Jolt
+    RecastNavigation::Recast
+    RecastNavigation::Detour
+    Freetype::Freetype
 )

@@ -17,6 +17,8 @@ namespace Lca {
         class ParticleSystemPipeline : public GraphicsPipeline {
         public:
             ParticleSystemPipeline(const GraphicsPipelineConfig& config);
+            ParticleSystemPipeline(ParticleSystemPipeline&&) noexcept = default;
+            ParticleSystemPipeline& operator=(ParticleSystemPipeline&&) noexcept = default;
             virtual ~ParticleSystemPipeline() override = default;
 
             virtual void build() override;
